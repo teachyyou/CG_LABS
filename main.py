@@ -34,6 +34,18 @@ def saveHistogram(grayU8: np.ndarray, title: str, outPath: Path) -> None:
     plt.close()
 
 
+def saveHistogramColor(channelU8: np.ndarray, title: str, outPath: Path, color: str) -> None:
+    data = channelU8.ravel()
+    plt.figure()
+    plt.hist(data, bins=256, range=(0, 255), color=color)
+    plt.title(title)
+    plt.xlabel("Intensity (0-255)")
+    plt.ylabel("Pixel count")
+    plt.tight_layout()
+    plt.savefig(outPath, dpi=150)
+    plt.close()
+
+
 def main():
     inputImagePath = Path("1.png")
     outputDir = Path("out")
@@ -65,12 +77,49 @@ def main():
     saveHistogram(grayNtsc, "Histogram: Grayscale NTSC", fileHistNtsc)
     saveHistogram(graySrgb, "Histogram: Grayscale sRGB", fileHistSrgb)
 
+    arrU8 = np.asarray(imgRgb).astype(np.uint8)
+
+    redChannel = arrU8[..., 0]
+    greenChannel = arrU8[..., 1]
+    blueChannel = arrU8[..., 2]
+
+    zeros = np.zeros_like(redChannel, dtype=np.uint8)
+    redOnly = np.dstack([redChannel, zeros, zeros])
+    greenOnly = np.dstack([zeros, greenChannel, zeros])
+    blueOnly = np.dstack([zeros, zeros, blueChannel])
+
+    imgRedOnly = Image.fromarray(redOnly)
+    imgGreenOnly = Image.fromarray(greenOnly)
+    imgBlueOnly = Image.fromarray(blueOnly)
+
+    fileRedOnly = outputDir / "channel_red.png"
+    fileGreenOnly = outputDir / "channel_green.png"
+    fileBlueOnly = outputDir / "channel_blue.png"
+
+    imgRedOnly.save(fileRedOnly)
+    imgGreenOnly.save(fileGreenOnly)
+    imgBlueOnly.save(fileBlueOnly)
+
+    fileHistRed = outputDir / "histogram_red.png"
+    fileHistGreen = outputDir / "histogram_green.png"
+    fileHistBlue = outputDir / "histogram_blue.png"
+
+    saveHistogramColor(redChannel, "Histogram: Red channel", fileHistRed, "red")
+    saveHistogramColor(greenChannel, "Histogram: Green channel", fileHistGreen, "green")
+    saveHistogramColor(blueChannel, "Histogram: Blue channel", fileHistBlue, "blue")
+
     print("Файлы сохранены:")
     print(" -", fileNtsc)
     print(" -", fileSrgb)
     print(" -", fileDiff)
     print(" -", fileHistNtsc)
     print(" -", fileHistSrgb)
+    print(" -", fileRedOnly)
+    print(" -", fileGreenOnly)
+    print(" -", fileBlueOnly)
+    print(" -", fileHistRed)
+    print(" -", fileHistGreen)
+    print(" -", fileHistBlue)
 
 
 if __name__ == "__main__":
