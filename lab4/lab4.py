@@ -65,6 +65,28 @@ def polyCentroid(vertices):
     A *= 0.5
     return (Cx/(6*A), Cy/(6*A))
 
+def segmentIntersection(a,b,c,d):
+    def cross(u,v): return u[0]*v[1]-u[1]*v[0]
+    r = (b[0]-a[0], b[1]-a[1])
+    s = (d[0]-c[0], d[1]-c[1])
+    denom = cross(r,s)
+    qp = (c[0]-a[0], c[1]-a[1])
+    if abs(denom) < 1e-12:
+        return (False, None)
+    t = cross(qp, s)/denom
+    u = cross(qp, r)/denom
+    if 0 <= t <= 1 and 0 <= u <= 1:
+        x = a[0] + t*r[0]
+        y = a[1] + t*r[1]
+        return (True, (x,y))
+    return (False, None)
+
+def classifyPointVsEdge(p, a, b, eps=1e-9):
+    c = (b[0]-a[0])*(p[1]-a[1]) - (b[1]-a[1])*(p[0]-a[0])
+    if c > eps: return "Left"
+    if c < -eps: return "Right"
+    return "On"
+
 class Polygon:
     def __init__(self, vertices):
         self.vertices = vertices[:]
@@ -83,6 +105,11 @@ class Polygon:
             x1,y1 = self.vertices[i]; x2,y2 = self.vertices[(i+1)%m if m>1 else i]
             if distPointToSegment(x,y,x1,y1,x2,y2) <= tol: return True
         return False
+    def edges(self):
+        m = len(self.vertices)
+        if m == 1: return [ (self.vertices[0], self.vertices[0]) ]
+        if m == 2: return [ (self.vertices[0], self.vertices[1]) ]
+        return [ (self.vertices[i], self.vertices[(i+1)%m]) for i in range(m) ]
     def applyMatrix(self, M):
         out = []
         for (x,y) in self.vertices:
@@ -93,36 +120,28 @@ class Polygon:
 
 class App:
     def __init__(self, root):
-        root.title("Polygons — Draw + Affine (Matrices)")
+        root.title("Polygons — Draw + Affine + Tests")
         self.root = root
-
         toolbar = tk.Frame(root)
         toolbar.pack(side=tk.TOP, fill=tk.X)
-
         self.btnFinish = tk.Button(toolbar, text="Завершить полигон", command=self.finishPolygon)
         self.btnClear = tk.Button(toolbar, text="Очистить сцену", command=self.clearScene)
         self.btnFinish.pack(side=tk.LEFT, padx=4, pady=5)
         self.btnClear.pack(side=tk.LEFT, padx=4, pady=5)
-
         sep1 = tk.Label(toolbar, text="  |  "); sep1.pack(side=tk.LEFT)
-
         tk.Label(toolbar, text="dx:").pack(side=tk.LEFT)
         self.entDx = tk.Entry(toolbar, width=6); self.entDx.insert(0,"0"); self.entDx.pack(side=tk.LEFT)
         tk.Label(toolbar, text="dy:").pack(side=tk.LEFT)
         self.entDy = tk.Entry(toolbar, width=6); self.entDy.insert(0,"0"); self.entDy.pack(side=tk.LEFT)
         tk.Button(toolbar, text="Сместить", command=self.uiTranslate).pack(side=tk.LEFT, padx=4)
-
         sep2 = tk.Label(toolbar, text="  |  "); sep2.pack(side=tk.LEFT)
-
         tk.Label(toolbar, text="угол°:").pack(side=tk.LEFT)
         self.entAngle = tk.Entry(toolbar, width=6); self.entAngle.insert(0,"0"); self.entAngle.pack(side=tk.LEFT)
         self.btnPickRot = tk.Button(toolbar, text="Опорная точка", command=lambda:self.setPickMode('rotate'))
         self.btnPickRot.pack(side=tk.LEFT, padx=3)
         tk.Button(toolbar, text="Поворот от точки", command=self.rotateAboutPoint).pack(side=tk.LEFT, padx=3)
         tk.Button(toolbar, text="Поворот от центра", command=self.rotateAboutCenter).pack(side=tk.LEFT, padx=3)
-
         sep3 = tk.Label(toolbar, text="  |  "); sep3.pack(side=tk.LEFT)
-
         tk.Label(toolbar, text="sx:").pack(side=tk.LEFT)
         self.entSx = tk.Entry(toolbar, width=6); self.entSx.insert(0,"1"); self.entSx.pack(side=tk.LEFT)
         tk.Label(toolbar, text="sy:").pack(side=tk.LEFT)
@@ -131,13 +150,16 @@ class App:
         self.btnPickScale.pack(side=tk.LEFT, padx=3)
         tk.Button(toolbar, text="Масштаб от точки", command=self.scaleAboutPoint).pack(side=tk.LEFT, padx=3)
         tk.Button(toolbar, text="Масштаб от центра", command=self.scaleAboutCenter).pack(side=tk.LEFT, padx=3)
-
+        tools = tk.Frame(root)
+        tools.pack(side=tk.TOP, fill=tk.X)
+        tk.Label(tools, text="Режим:").pack(side=tk.LEFT, padx=6)
+        self.mode = tk.StringVar(value="draw")
+        for txt,val in [("Рисование","draw"),("Пересечение рёбер","intersect"),("Точка в полигоне","pip"),("Точка vs Ребро","pve")]:
+            tk.Radiobutton(tools, text=txt, variable=self.mode, value=val).pack(side=tk.LEFT, padx=4)
         self.status = tk.Label(root, text="Готово", anchor="w")
         self.status.pack(side=tk.BOTTOM, fill=tk.X)
-
         self.canvas = tk.Canvas(root, bg="white", width=1000, height=650)
         self.canvas.pack(fill=tk.BOTH, expand=True)
-
         self.polygons = []
         self.currentVertices = []
         self.previewIds = []
@@ -145,11 +167,13 @@ class App:
         self.selectedPoly = None
         self.pickMode = None
         self.pickedPoint = None
-
+        self.intersectEdge = None
+        self.intersectFirstPoint = None
+        self.edgeForPve = None
+        self.annotations = []
         self.canvas.bind("<Button-1>", self.onLeftClick)
         self.canvas.bind("<Double-Button-1>", self.onDoubleLeftClick)
         self.canvas.bind("<Motion>", self.onMouseMove)
-
         self.redraw()
 
     def parseFloat(self, entry, defaultValue):
@@ -171,6 +195,33 @@ class App:
                 x0,y0,x1,y1 = poly.bbox()
                 self.canvas.create_rectangle(x0-6,y0-6,x1+6,y1+6, outline="#2ca02c", dash=(4,2), width=2)
         self.drawPreview()
+        if self.mode.get() == "intersect":
+            if self.intersectEdge:
+                a,b = self.intersectEdge
+                self.canvas.create_line(a[0],a[1],b[0],b[1], dash=(3,2))
+            if self.intersectFirstPoint:
+                x1,y1 = self.intersectFirstPoint
+                cx,cy = self.lastMouse if self.lastMouse else (x1,y1)
+                self.canvas.create_line(x1,y1,cx,cy, fill="#d62728", dash=(2,2))
+                if self.intersectEdge:
+                    ok,P = segmentIntersection(self.intersectEdge[0], self.intersectEdge[1], (x1,y1), (cx,cy))
+                    if ok:
+                        self.canvas.create_oval(P[0]-4,P[1]-4,P[0]+4,P[1]+4, outline="#d62728", width=2)
+        if self.mode.get() == "pve" and self.edgeForPve:
+            a,b = self.edgeForPve
+            self.canvas.create_line(a[0],a[1],b[0],b[1], dash=(3,2))
+        for ann in self.annotations:
+            if ann["kind"] == "pip":
+                x,y = ann["p"]
+                self.canvas.create_text(x+8,y-8, text=ann["label"], anchor="w")
+                self.canvas.create_oval(x-3,y-3,x+3,y+3, fill="#000000")
+            elif ann["kind"] == "pve":
+                x,y = ann["p"]
+                self.canvas.create_text(x+8,y-8, text=ann["label"], anchor="w")
+                self.canvas.create_oval(x-3,y-3,x+3,y+3, fill="#000000")
+            elif ann["kind"] == "ix":
+                x,y = ann["p"]
+                self.canvas.create_oval(x-4,y-4,x+4,y+4, fill="#d62728", outline="")
         if self.pickedPoint is not None:
             x,y = self.pickedPoint
             self.canvas.create_oval(x-4,y-4,x+4,y+4, outline="#d62728", width=2)
@@ -231,24 +282,92 @@ class App:
             self.status.config(text=f"Опорная точка: ({x:.1f},{y:.1f})")
             self.redraw()
             return
-        if self.currentVertices:
-            self.currentVertices.append((x, y))
-            self.redraw()
-            return
-        for poly in reversed(self.polygons):
-            if poly.hitTest(x,y):
-                self.selectPolygon(poly)
+        mode = self.mode.get()
+        if mode == "draw":
+            if self.currentVertices:
+                self.currentVertices.append((x, y))
                 self.redraw()
                 return
-        self.currentVertices = [(x, y)]
-        self.redraw()
+            for poly in reversed(self.polygons):
+                if poly.hitTest(x,y):
+                    self.selectPolygon(poly)
+                    self.redraw()
+                    return
+            self.currentVertices = [(x, y)]
+            self.redraw()
+            return
+        if mode == "intersect":
+            if self.intersectFirstPoint is None and self.intersectEdge is not None:
+                poly, edge, d = self.pickEdgeNear(x,y, tol=8)
+                if edge is not None:
+                    self.intersectEdge = edge
+                    self.status.config(text="Выбрано новое ребро. Укажите 2 точки второго отрезка")
+                    self.redraw()
+                    return
+            if self.intersectEdge is None:
+                poly, edge, d = self.pickEdgeNear(x,y, tol=8)
+                if edge is None:
+                    self.status.config(text="Кликните ближе к ребру полигона")
+                    return
+                self.intersectEdge = edge
+                self.status.config(text="Укажите 2 точки второго отрезка")
+                self.redraw()
+                return
+            if self.intersectFirstPoint is None:
+                self.intersectFirstPoint = (x,y)
+                self.status.config(text="Выберите вторую точку второго отрезка")
+                self.redraw()
+                return
+            a,b = self.intersectEdge
+            c = self.intersectFirstPoint
+            dpt = (x,y)
+            ok,P = segmentIntersection(a,b,c,dpt)
+            if ok:
+                self.annotations.append({"kind":"ix","p":P})
+            else:
+                self.status.config(text="Пересечения нет")
+            self.intersectFirstPoint = None
+            self.redraw()
+            return
+        if mode == "pip":
+            if self.selectedPoly is None:
+                for poly in reversed(self.polygons):
+                    if poly.hitTest(x,y):
+                        self.selectPolygon(poly)
+                        break
+            if self.selectedPoly is None or len(self.selectedPoly.vertices) == 0:
+                self.status.config(text="Нет выделенного полигона")
+                return
+            verts = self.selectedPoly.vertices
+            inside = pointInPoly((x,y), verts if len(verts)>=3 else verts)
+            self.annotations.append({"kind":"pip","p":(x,y),"label":"Inside" if inside else "Outside"})
+            self.redraw()
+            return
+        if mode == "pve":
+            if self.edgeForPve is None:
+                poly, edge, d = self.pickEdgeNear(x,y, tol=8)
+                if edge is None:
+                    self.status.config(text="Кликните ближе к ребру, чтобы выбрать его")
+                    return
+                self.edgeForPve = edge
+                self.status.config(text="Теперь кликайте точки — Left/Right/On")
+                self.redraw()
+                return
+            a,b = self.edgeForPve
+            lab = classifyPointVsEdge((x,y), a, b)
+            self.annotations.append({"kind":"pve","p":(x,y),"label":lab})
+            self.redraw()
+            return
 
     def onDoubleLeftClick(self, event):
         self.finishPolygon()
 
     def onMouseMove(self, event):
         self.lastMouse = (event.x, event.y)
-        self.drawPreview()
+        if self.mode.get() == "intersect" and self.intersectFirstPoint is not None:
+            self.redraw()
+        else:
+            self.drawPreview()
 
     def finishPolygon(self):
         if not self.currentVertices:
@@ -266,6 +385,10 @@ class App:
         self.selectedPoly = None
         self.pickedPoint = None
         self.pickMode = None
+        self.intersectEdge = None
+        self.intersectFirstPoint = None
+        self.edgeForPve = None
+        self.annotations = []
         self.redraw()
 
     def selectPolygon(self, poly):
@@ -337,6 +460,15 @@ class App:
         M = matMul(matMul(translate(cx,cy), scale(sx,sy)), translate(-cx,-cy))
         poly.applyMatrix(M)
         self.redraw()
+
+    def pickEdgeNear(self, x, y, tol=6):
+        best = (None, None, 1e9)
+        for poly in self.polygons:
+            for (a,b) in poly.edges():
+                d = distPointToSegment(x,y,a[0],a[1],b[0],b[1])
+                if d < best[2]:
+                    best = (poly, (a,b), d)
+        return best if best[2] <= tol else (None, None, None)
 
 if __name__ == "__main__":
     root = tk.Tk()
