@@ -2,6 +2,8 @@ import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 import math, random, re
 
+# ------------------------- L-system core -------------------------
+
 class StochasticRule:
     def __init__(self):
         self.variants = []
@@ -200,13 +202,130 @@ PRESETS = {
     },
 }
 
-class App(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("L-системы — фрактальные узоры")
-        self.geometry("1100x700")
-        self.minsize(900, 600)
+def _lerp(a, b, t):
+    return a + (b - a) * t
 
+def _lerp_color(c1, c2, t):
+    r = int(_lerp(c1[0], c2[0], t))
+    g = int(_lerp(c1[1], c2[1], t))
+    b = int(_lerp(c1[2], c2[2], t))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+class FractalTreeTab(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master)
+        self._build_ui()
+        self.bind("<Configure>", lambda e: self._schedule_redraw())
+        self._redraw_pending = False
+
+    def _build_ui(self):
+        left = tk.Frame(self, padx=8, pady=8)
+        left.pack(side=tk.LEFT, fill=tk.Y)
+
+        self.canvas = tk.Canvas(self, bg="white")
+        self.canvas.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        row = 0
+        ttk.Label(left, text="Фрактальное дерево (1.б)").grid(row=row, column=0, sticky="w"); row += 1
+        ttk.Separator(left).grid(row=row, column=0, sticky="we", pady=6); row += 1
+
+        self.depth = tk.IntVar(value=10)
+        self.base_angle = tk.DoubleVar(value=22.5)
+        self.jitter = tk.DoubleVar(value=8.0)
+        self.len0 = tk.DoubleVar(value=180.0)
+        self.len_decay = tk.DoubleVar(value=0.72)
+        self.thick0 = tk.DoubleVar(value=12.0)
+        self.thick_decay = tk.DoubleVar(value=0.68)
+        self.seed = tk.StringVar(value="")
+
+        g1 = tk.Frame(left); g1.grid(row=row, column=0, sticky="we"); row += 1
+        ttk.Label(g1, text="Глубина").grid(row=0, column=0, sticky="w"); ttk.Spinbox(g1, from_=0, to=14, textvariable=self.depth, width=5).grid(row=0, column=1)
+        ttk.Label(g1, text="Баз. угол°").grid(row=0, column=2, sticky="w", padx=(8,0)); ttk.Entry(g1, textvariable=self.base_angle, width=7).grid(row=0, column=3)
+        ttk.Label(g1, text="Jitter°").grid(row=0, column=4, sticky="w", padx=(8,0)); ttk.Entry(g1, textvariable=self.jitter, width=7).grid(row=0, column=5)
+
+        g2 = tk.Frame(left); g2.grid(row=row, column=0, sticky="we"); row += 1
+        ttk.Label(g2, text="Длина0").grid(row=0, column=0, sticky="w"); ttk.Entry(g2, textvariable=self.len0, width=7).grid(row=0, column=1)
+        ttk.Label(g2, text="DecayL").grid(row=0, column=2, sticky="w", padx=(8,0)); ttk.Entry(g2, textvariable=self.len_decay, width=7).grid(row=0, column=3)
+        ttk.Label(g2, text="Толщ.0").grid(row=0, column=4, sticky="w", padx=(8,0)); ttk.Entry(g2, textvariable=self.thick0, width=7).grid(row=0, column=5)
+        ttk.Label(g2, text="DecayT").grid(row=0, column=6, sticky="w", padx=(8,0)); ttk.Entry(g2, textvariable=self.thick_decay, width=7).grid(row=0, column=7)
+
+        g3 = tk.Frame(left); g3.grid(row=row, column=0, sticky="we"); row += 1
+        ttk.Label(g3, text="Seed").grid(row=0, column=0, sticky="w"); ttk.Entry(g3, textvariable=self.seed, width=12).grid(row=0, column=1, sticky="w")
+        tk.Button(left, text="Сгенерировать", command=self.redraw).grid(row=row, column=0, sticky="we"); row += 1
+        ttk.Label(left, text="От коричневого к зелёному, толщина уменьшается, угол ветвей со случайным разбросом.",
+                  foreground="#555").grid(row=row, column=0, sticky="w")
+
+    def _rng(self):
+        s = self.seed.get().strip()
+        if not s:
+            return random.Random()
+        try:
+            return random.Random(int(s))
+        except:
+            return random.Random(hash(s))
+
+    def _schedule_redraw(self):
+        if self._redraw_pending:
+            return
+        self._redraw_pending = True
+        self.after_idle(self._redraw_now)
+
+    def redraw(self):
+        self._redraw_pending = True
+        self.after_idle(self._redraw_now)
+
+    def _redraw_now(self):
+        self._redraw_pending = False
+        c = self.canvas
+        w, h = max(10, c.winfo_width()), max(10, c.winfo_height())
+        c.delete("all")
+
+        try:
+            depth = int(self.depth.get())
+            base_angle = math.radians(float(self.base_angle.get()))
+            jitter = math.radians(float(self.jitter.get()))
+            len0 = float(self.len0.get())
+            len_decay = float(self.len_decay.get())
+            thick0 = float(self.thick0.get())
+            thick_decay = float(self.thick_decay.get())
+        except Exception:
+            return
+
+        rng = self._rng()
+
+        x0 = w / 2
+        y0 = h - 30
+        heading = -math.pi / 2
+
+        brown = (139, 69, 19)
+        green = (34, 139, 34)
+
+        def branch(x, y, length, angle, thickness, level, max_level):
+            if level > max_level or thickness < 0.5 or length < 1.0:
+                return
+            nx = x + math.cos(angle) * length
+            ny = y + math.sin(angle) * length
+            t = level / max(1, max_level)
+            color = _lerp_color(brown, green, t)
+            c.create_line(x, y, nx, ny, width=thickness, fill=color, capstyle=tk.ROUND)
+            if level == max_level:
+                return
+            j1 = rng.uniform(-jitter, jitter)
+            j2 = rng.uniform(-jitter, jitter)
+            a1 = angle - base_angle + j1
+            a2 = angle + base_angle + j2
+            branch(nx, ny, length * len_decay, a1, thickness * thick_decay, level + 1, max_level)
+            branch(nx, ny, length * len_decay, a2, thickness * thick_decay, level + 1, max_level)
+            if rng.random() < 0.12:
+                j3 = rng.uniform(-jitter, jitter)
+                a3 = angle + rng.uniform(-base_angle * 0.5, base_angle * 0.5) + j3
+                branch(nx, ny, length * len_decay * 0.9, a3, thickness * thick_decay * 0.9, level + 1, max_level)
+
+        branch(x0, y0, len0, heading, thick0, 0, depth)
+
+class LSystemTab(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master)
         self.sidebar = tk.Frame(self, padx=8, pady=8)
         self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
 
@@ -235,8 +354,7 @@ class App(tk.Tk):
         ttk.Label(self.sidebar, text="Аксиома / угол / направление").grid(row=row, column=0, sticky="w")
         row += 1
         self.axiom_var = tk.StringVar(value="F")
-        self.entry_axiom = ttk.Entry(self.sidebar, textvariable=self.axiom_var)
-        self.entry_axiom.grid(row=row, column=0, sticky="we"); row += 1
+        ttk.Entry(self.sidebar, textvariable=self.axiom_var).grid(row=row, column=0, sticky="we"); row += 1
 
         frame_nums = tk.Frame(self.sidebar)
         frame_nums.grid(row=row, column=0, sticky="we")
@@ -386,6 +504,20 @@ class App(tk.Tk):
         for seg in self._last_segments:
             X1, Y1, X2, Y2 = transform(seg, scale, tx, ty, h)
             self.canvas.create_line(X1, Y1, X2, Y2)
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Фракталы: L-система и дерево (1.б)")
+        self.geometry("1100x700")
+        self.minsize(900, 600)
+
+        nb = ttk.Notebook(self)
+        self.tab_lsys = LSystemTab(nb)
+        self.tab_tree = FractalTreeTab(nb)
+        nb.add(self.tab_lsys, text="L-система (1.а)")
+        nb.add(self.tab_tree, text="Фрактальное дерево (1.б)")
+        nb.pack(fill=tk.BOTH, expand=True)
 
 if __name__ == "__main__":
     App().mainloop()
