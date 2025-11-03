@@ -164,7 +164,7 @@ def make_dodecahedron():
         pts = ico.V[np.array(f.indices)]
         centers.append(np.mean(pts, axis=0))
     centers = np.array(centers)
-    centers /= np.max(np.linalg.norm(centers, axis=1))
+    centers /= np.max(np.linalg_norm(centers, axis=1)) if hasattr(np, "linalg_norm") else np.max(np.linalg.norm(centers, axis=1))
     ico_faces = [f.indices for f in ico.faces]
     dfaces = []
     for vi, v in enumerate(ico.V):
@@ -182,10 +182,44 @@ def make_dodecahedron():
         dfaces.append(incident_sorted)
     centers /= np.max(np.linalg.norm(centers, axis=1))
     return Polyhedron(centers, dfaces)
+def build_revolution(points, axis_letter, segments):
+    axis_letter = axis_letter.lower()
+    points = np.array(points, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 3 or len(points) < 2:
+        raise ValueError("Нужны как минимум две 3D точки")
+    if segments < 3:
+        raise ValueError("Количество разбиений ≥ 3")
+    if axis_letter == 'x':
+        Rf = matrix_rotate_x
+    elif axis_letter == 'y':
+        Rf = matrix_rotate_y
+    elif axis_letter == 'z':
+        Rf = matrix_rotate_z
+    else:
+        raise ValueError("Ось должна быть x, y или z")
+    verts = []
+    for k in range(segments):
+        ang = 2 * math.pi * k / segments
+        R = Rf(ang)
+        P = np.hstack([points, np.ones((points.shape[0], 1))])
+        Pr = (R @ P.T).T[:, :3]
+        verts.append(Pr)
+    V = np.vstack(verts)
+    faces = []
+    m = points.shape[0]
+    for k in range(segments):
+        kn = (k + 1) % segments
+        for i in range(m - 1):
+            a = k * m + i
+            b = k * m + i + 1
+            c = kn * m + i + 1
+            d = kn * m + i
+            faces.append([a, b, c, d])
+    return Polyhedron(V, faces)
 class PolyhedronApp:
     def __init__(self, root):
         self.root = root
-        root.title("Лабораторная работа 6/7 — OBJ")
+        root.title("Лабораторная работа 6/7 — OBJ + Вращение")
         self.canvas_w = 720
         self.canvas_h = 720
         self.poly = make_tetrahedron()
@@ -206,7 +240,7 @@ class PolyhedronApp:
             highlightthickness=0
         )
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        ctrl = ttk.Frame(main, width=340)
+        ctrl = ttk.Frame(main, width=380)
         ctrl.pack(side=tk.RIGHT, fill=tk.Y, padx=6, pady=6)
         self.nb = ttk.Notebook(ctrl)
         self.nb.pack(fill=tk.BOTH, expand=True)
@@ -337,6 +371,29 @@ class PolyhedronApp:
         ttk.Button(right, text="Сброс и подгонка", command=self.reset).grid(
             row=9, column=0, columnspan=2, sticky="we", pady=(10, 0)
         )
+        tab_rev = ttk.Frame(self.nb)
+        self.nb.add(tab_rev, text="Фигура вращения")
+        tab_rev.columnconfigure(0, weight=1)
+        tab_rev.columnconfigure(1, weight=1)
+        ttk.Label(tab_rev, text="Образующая (x y z по строке):").grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=(6,2))
+        self.gen_text = tk.Text(tab_rev, height=10, width=40)
+        self.gen_text.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=4)
+        sample = "\n".join(["0 0 -1","0 0 1","0.5 0 1","0.5 0 -1","0 0 -1"])
+        self.gen_text.delete("1.0", tk.END)
+        self.gen_text.insert("1.0", sample)
+        ttk.Label(tab_rev, text="Ось:").grid(row=2, column=0, sticky="w", padx=4, pady=(6,2))
+        self.rev_axis_var = tk.StringVar(value="z")
+        ttk.OptionMenu(tab_rev, self.rev_axis_var, "z", "x", "y", "z").grid(row=2, column=1, sticky="we", padx=4, pady=(6,2))
+        ttk.Label(tab_rev, text="Разбиений (≥3):").grid(row=3, column=0, sticky="w", padx=4, pady=2)
+        self.rev_segments_e = ttk.Entry(tab_rev)
+        self.rev_segments_e.insert(0, "24")
+        self.rev_segments_e.grid(row=3, column=1, sticky="we", padx=4, pady=2)
+        actfrm = ttk.Frame(tab_rev)
+        actfrm.grid(row=4, column=0, columnspan=2, sticky="we", padx=4, pady=(6,4))
+        actfrm.columnconfigure(0, weight=1)
+        actfrm.columnconfigure(1, weight=1)
+        ttk.Button(actfrm, text="Построить", command=self.build_revolution_ui).grid(row=0, column=0, sticky="we", padx=(0,2))
+        ttk.Button(actfrm, text="Сохранить OBJ", command=self.save_obj_dialog).grid(row=0, column=1, sticky="we", padx=(2,0))
         self.fit_in_view()
         self.draw()
     def change_poly(self, _=None):
@@ -373,9 +430,7 @@ class PolyhedronApp:
         self.draw()
     def apply_translate(self):
         try:
-            tx = float(self.tx.get())
-            ty = float(self.ty.get())
-            tz = float(self.tz.get())
+            tx = float(self.tx.get()); ty = float(self.ty.get()); tz = float(self.tz.get())
         except ValueError:
             messagebox.showerror("Ошибка ввода", "tx, ty, tz должны быть числами")
             return
@@ -384,9 +439,7 @@ class PolyhedronApp:
         self.draw()
     def apply_scale(self):
         try:
-            sx = float(self.sx.get())
-            sy = float(self.sy.get())
-            sz = float(self.sz.get())
+            sx = float(self.sx.get()); sy = float(self.sy.get()); sz = float(self.sz.get())
         except ValueError:
             messagebox.showerror("Ошибка ввода", "Коэффициенты масштаба должны быть числами")
             return
@@ -525,6 +578,41 @@ class PolyhedronApp:
             for face in poly.faces:
                 idxs = [str(i + 1) for i in face.indices]
                 f.write("f " + " ".join(idxs) + "\n")
+    def build_revolution_ui(self):
+        txt = self.gen_text.get("1.0", tk.END).strip()
+        if not txt:
+            messagebox.showerror("Ошибка", "Задайте точки образующей")
+            return
+        pts = []
+        for line in txt.replace(",", " ").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) < 3:
+                messagebox.showerror("Ошибка", f"Строка '{line}' должна содержать x y z")
+                return
+            try:
+                x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
+            except ValueError:
+                messagebox.showerror("Ошибка", f"Неверный формат числа в строке '{line}'")
+                return
+            pts.append([x, y, z])
+        try:
+            segs = int(self.rev_segments_e.get())
+        except ValueError:
+            messagebox.showerror("Ошибка", "Разбиений должно быть целым числом")
+            return
+        axis = self.rev_axis_var.get()
+        try:
+            poly = build_revolution(pts, axis, segs)
+        except Exception as e:
+            messagebox.showerror("Ошибка построения", str(e))
+            return
+        self.poly = poly
+        self.fit_in_view()
+        self.draw()
+        self.poly_var.set("Вращение")
 def main():
     root = tk.Tk()
     style = ttk.Style()
@@ -533,7 +621,7 @@ def main():
     except Exception:
         pass
     app = PolyhedronApp(root)
-    root.minsize(1060, 720)
+    root.minsize(1100, 720)
     root.mainloop()
 if __name__ == "__main__":
     main()
