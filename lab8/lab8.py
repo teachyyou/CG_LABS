@@ -172,10 +172,23 @@ def compute_face_normal_outward(V, idxs, obj_center):
     if np.dot(n, dir_out) < 0: n = -n
     return n
 
+def look_at(camera_pos, target, up=np.array([0,1,0], dtype=float)):
+    f = target - camera_pos
+    fn = f / (np.linalg.norm(f) + 1e-12)
+    s = np.cross(fn, up); s = s / (np.linalg.norm(s) + 1e-12)
+    u = np.cross(s, fn)
+    M = np.eye(4)
+    M[0, :3] = s
+    M[1, :3] = u
+    M[2, :3] = -fn
+    T = np.eye(4)
+    T[:3, 3] = -camera_pos
+    return M @ T
+
 class PolyhedronApp:
     def __init__(self, root):
         self.root = root
-        root.title("Лабораторная — Z-буфер + два объекта")
+        root.title("Лабораторная 8")
         self.canvas_w = 720
         self.canvas_h = 720
 
@@ -195,20 +208,31 @@ class PolyhedronApp:
         self.cull_enabled = False
         self.zbuffer_enabled = False
         self.render_scale = 1.0
-        self.anim_enabled = True
 
-        self.overlay_wire_enabled = True              # <-- НОВОЕ: каркас поверх заливки
-        self.overlay_wire_front_only = True           # <-- НОВОЕ: только фронтальные / все
-        self.wire_on_fill_color = "#ffffff"           # <-- НОВОЕ: цвет линий поверх заливки
-        self.wire_on_fill_width = 1                   # <-- НОВОЕ: толщина линий
+        self.overlay_wire_enabled = True
+        self.overlay_wire_front_only = True
+        self.wire_on_fill_color = "#ffffff"
+        self.wire_on_fill_width = 1
 
         self.look_vec = np.array([0.0, 0.0, -1.0])
+
+        self.camera_enabled = False
+        self.cam_pos = np.array([0.0, 0.0, 6.0], dtype=float)
+        self.cam_target = np.array([0.0, 0.0, 0.0], dtype=float)
+        self.cam_fov_deg = 60.0
+        self.cam_orbit_enabled = True
+        self.cam_orbit_speed_deg = 2.0
+        self.cam_orbit_radius = 6.0
+        self.cam_up = np.array([0.0, 1.0, 0.0], dtype=float)
+        self.cam_angle_deg = 0.0
+
+        self.anim_enabled = True
 
         main = ttk.Frame(root); main.pack(fill=tk.BOTH, expand=True)
         self.canvas = tk.Canvas(main, width=self.canvas_w, height=self.canvas_h, bg=self.bg_color, highlightthickness=0)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        ctrl = ttk.Frame(main, width=520); ctrl.pack(side=tk.RIGHT, fill=tk.Y, padx=6, pady=6)
+        ctrl = ttk.Frame(main, width=560); ctrl.pack(side=tk.RIGHT, fill=tk.Y, padx=6, pady=6)
         self.nb = ttk.Notebook(ctrl); self.nb.pack(fill=tk.BOTH, expand=True)
 
         tab_a = ttk.Frame(self.nb); self.nb.add(tab_a, text="Объект A")
@@ -219,6 +243,9 @@ class PolyhedronApp:
 
         tab_tr = ttk.Frame(self.nb); self.nb.add(tab_tr, text="Сцена")
         self._build_scene_tab(tab_tr)
+
+        tab_cam = ttk.Frame(self.nb); self.nb.add(tab_cam, text="Камера")
+        self._build_camera_tab(tab_cam)
 
         self.fit_in_view()
         self.img_handle = None
@@ -303,18 +330,17 @@ class PolyhedronApp:
         self.cull_var = tk.BooleanVar(value=False)
         self.zbuf_var = tk.BooleanVar(value=False)
         self.anim_var = tk.BooleanVar(value=True)
-        self.overlay_wire_var = tk.BooleanVar(value=True)               # <-- НОВОЕ
-        self.overlay_wire_mode = tk.StringVar(value="Только фронт")     # <-- НОВОЕ
+        self.overlay_wire_var = tk.BooleanVar(value=True)
+        self.overlay_wire_mode = tk.StringVar(value="Только фронт")
 
         ttk.Checkbutton(flags, text="Отсекать нелицевые (каркас)", variable=self.cull_var, command=self.toggle_cull).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(flags, text="Z-буфер (заливка)", variable=self.zbuf_var, command=self.toggle_zbuf).grid(row=0, column=1, sticky="w")
-        ttk.Checkbutton(flags, text="Вращать", variable=self.anim_var, command=self.toggle_anim).grid(row=0, column=2, sticky="w")
+        ttk.Checkbutton(flags, text="Вращать объект", variable=self.anim_var, command=self.toggle_anim).grid(row=0, column=2, sticky="w")
 
         ttk.Label(flags, text="Качество Z-буфера:").grid(row=0, column=3, sticky="e")
         self.quality_var = tk.StringVar(value="100%")
         ttk.OptionMenu(flags, self.quality_var, "100%", "100%", "50%", "33%", "25%", command=self.change_quality).grid(row=0, column=4, sticky="we")
 
-        # НОВОЕ: Каркас поверх заливки + режим
         ttk.Checkbutton(flags, text="Каркас поверх заливки", variable=self.overlay_wire_var, command=self.toggle_overlay_wire).grid(row=0, column=5, sticky="w")
         ttk.OptionMenu(flags, self.overlay_wire_mode, "Только фронт", "Только фронт", "Все ребра", command=self.change_overlay_mode).grid(row=0, column=6, sticky="we")
 
@@ -359,6 +385,45 @@ class PolyhedronApp:
         ttk.Button(left, text="Повернуть", command=self.apply_rotate_around_center_scene).grid(row=9, column=3, columnspan=3, sticky="we", padx=(6,0))
 
         ttk.Button(frame, text="Сброс сцены", command=self.reset_scene).grid(row=10, column=0, columnspan=2, sticky="we", padx=4, pady=(10,6))
+
+    def _build_camera_tab(self, frame):
+        for i in range(4): frame.columnconfigure(i, weight=1)
+
+        self.cam_enabled_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frame, text="Использовать камеру", variable=self.cam_enabled_var, command=self.toggle_camera).grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=(6,2))
+        self.cam_orbit_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frame, text="Вращать камеру вокруг цели", variable=self.cam_orbit_var, command=self.toggle_cam_orbit).grid(row=0, column=2, columnspan=2, sticky="w", padx=4, pady=(6,2))
+
+        posf = ttk.LabelFrame(frame, text="Положение камеры (cx, cy, cz)")
+        posf.grid(row=1, column=0, columnspan=4, sticky="we", padx=4, pady=4)
+        for i in range(6): posf.columnconfigure(i, weight=1)
+        ttk.Label(posf, text="cx").grid(row=0, column=0); ttk.Label(posf, text="cy").grid(row=0, column=2); ttk.Label(posf, text="cz").grid(row=0, column=4)
+        self.cx_e = ttk.Entry(posf, width=10); self.cy_e = ttk.Entry(posf, width=10); self.cz_e = ttk.Entry(posf, width=10)
+        self.cx_e.insert(0, str(self.cam_pos[0])); self.cy_e.insert(0, str(self.cam_pos[1])); self.cz_e.insert(0, str(self.cam_pos[2]))
+        self.cx_e.grid(row=0, column=1, padx=2); self.cy_e.grid(row=0, column=3, padx=2); self.cz_e.grid(row=0, column=5, padx=2)
+
+        tgf = ttk.LabelFrame(frame, text="Цель камеры (tx, ty, tz)")
+        tgf.grid(row=2, column=0, columnspan=4, sticky="we", padx=4, pady=4)
+        for i in range(6): tgf.columnconfigure(i, weight=1)
+        ttk.Label(tgf, text="tx").grid(row=0, column=0); ttk.Label(tgf, text="ty").grid(row=0, column=2); ttk.Label(tgf, text="tz").grid(row=0, column=4)
+        self.tx_e2 = ttk.Entry(tgf, width=10); self.ty_e2 = ttk.Entry(tgf, width=10); self.tz_e2 = ttk.Entry(tgf, width=10)
+        self.tx_e2.insert(0, "0"); self.ty_e2.insert(0, "0"); self.tz_e2.insert(0, "0")
+        self.tx_e2.grid(row=0, column=1, padx=2); self.ty_e2.grid(row=0, column=3, padx=2); self.tz_e2.grid(row=0, column=5, padx=2)
+
+        pf = ttk.LabelFrame(frame, text="Параметры проекции")
+        pf.grid(row=3, column=0, columnspan=4, sticky="we", padx=4, pady=4)
+        for i in range(6): pf.columnconfigure(i, weight=1)
+        ttk.Label(pf, text="FOV°").grid(row=0, column=0)
+        self.fov_e = ttk.Entry(pf, width=10); self.fov_e.insert(0, str(self.cam_fov_deg))
+        self.fov_e.grid(row=0, column=1, padx=2)
+        ttk.Label(pf, text="Радиус орбиты").grid(row=0, column=2)
+        self.rad_e = ttk.Entry(pf, width=10); self.rad_e.insert(0, str(self.cam_orbit_radius))
+        self.rad_e.grid(row=0, column=3, padx=2)
+        ttk.Label(pf, text="Скорость°/кадр").grid(row=0, column=4)
+        self.spd_e = ttk.Entry(pf, width=10); self.spd_e.insert(0, str(self.cam_orbit_speed_deg))
+        self.spd_e.grid(row=0, column=5, padx=2)
+
+        ttk.Button(frame, text="Применить", command=self.apply_camera_params).grid(row=4, column=0, columnspan=4, sticky="we", padx=4, pady=(6,6))
 
     def change_poly(self, which):
         obj = self.objA if which == "A" else self.objB
@@ -426,6 +491,7 @@ class PolyhedronApp:
         self.objA.apply_matrix(T)
         if self.objB_enabled:
             self.objB.apply_matrix(T)
+        self.cam_target = np.array([0.0, 0.0, 0.0], dtype=float)
 
     def reset_object(self, which):
         if which == "A":
@@ -452,6 +518,20 @@ class PolyhedronApp:
         self.objB_on_var.set(False); self.objB_enabled = False
         self.objA = make_cube("#5a9bd8")
         self.objB = make_cube("#e4a84b")
+        self.camera_enabled = False; self.cam_enabled_var.set(False)
+        self.cam_pos = np.array([0.0, 0.0, 6.0], dtype=float)
+        self.cam_target = np.array([0.0, 0.0, 0.0], dtype=float)
+        self.cam_fov_deg = 60.0; self.cam_angle_deg = 0.0
+        self.cam_orbit_radius = 6.0; self.cam_orbit_speed_deg = 2.0; self.cam_orbit_var.set(True); self.cam_orbit_enabled = True
+        self.cx_e.delete(0, tk.END); self.cx_e.insert(0, str(self.cam_pos[0]))
+        self.cy_e.delete(0, tk.END); self.cy_e.insert(0, str(self.cam_pos[1]))
+        self.cz_e.delete(0, tk.END); self.cz_e.insert(0, str(self.cam_pos[2]))
+        self.tx_e2.delete(0, tk.END); self.tx_e2.insert(0, "0")
+        self.ty_e2.delete(0, tk.END); self.ty_e2.insert(0, "0")
+        self.tz_e2.delete(0, tk.END); self.tz_e2.insert(0, "0")
+        self.fov_e.delete(0, tk.END); self.fov_e.insert(0, str(self.cam_fov_deg))
+        self.rad_e.delete(0, tk.END); self.rad_e.insert(0, str(self.cam_orbit_radius))
+        self.spd_e.delete(0, tk.END); self.spd_e.insert(0, str(self.cam_orbit_speed_deg))
         self.fit_in_view(); self.draw()
 
     def _get_obj(self, which): return self.objA if which == "A" else self.objB
@@ -637,23 +717,38 @@ class PolyhedronApp:
 
     def _draw_face_wire(self, V3, face, mode, outline, width):
         if mode == 'persp': pts2 = project_perspective(V3, camera_distance=self.camera_distance)
-        else: pts2 = project_orthographic(V3)
+        elif mode == 'ortho': pts2 = project_orthographic(V3)
+        else: pts2 = V3[:, :2]
         coords = []
         for idx in face.indices:
             x, y = pts2[idx]
             coords.extend([float(x * self.scale + self.offset[0]), float(y * self.scale + self.offset[1])])
         self.canvas.create_polygon(coords, fill="", outline=outline, width=width)
 
+    def _draw_face_wire_camera(self, V_eye, face, f):
+        idx = face.indices
+        pts = V_eye[idx]
+        ze = pts[:,2]
+        if np.any(ze >= -1e-6): pass
+        x = pts[:,0]; y = pts[:,1]; z = -ze
+        x2 = (x * f) / z; y2 = (y * f) / z
+        coords = []
+        for i in range(len(idx)):
+            sx = float(x2[i] * self.scale + self.offset[0])
+            sy = float(y2[i] * self.scale + self.offset[1])
+            coords.extend([sx, sy])
+        self.canvas.create_polygon(coords, fill="", outline=self.front_outline, width=2)
+
     def render_zbuffer(self):
+        if self.camera_enabled:
+            return self.render_zbuffer_camera()
         Wc, Hc = self.canvas_w, self.canvas_h
         s = self.render_scale
         Wr = max(1, int(Wc * s))
         Hr = max(1, int(Hc * s))
-
         zbuf = np.full((Hr, Wr), np.inf, dtype=float)
         rgb = np.zeros((Hr, Wr, 3), dtype=np.uint8)
         d = self.camera_distance
-
         scale_r = self.scale * s
         offset_r = np.array([Wr / 2.0, Hr / 2.0], dtype=float)
 
@@ -704,10 +799,8 @@ class PolyhedronApp:
                 V = (R @ V.T).T
                 pts2 = project_orthographic(V)
                 depth = (-V[:,2])
-
             sx_all, sy_all = to_screen(pts2)
             color = np.array(obj_color_tuple(obj.color), dtype=np.uint8)
-
             for f in obj.faces:
                 idx = f.indices
                 if len(idx) < 3: continue
@@ -723,7 +816,90 @@ class PolyhedronApp:
         data = rgb.tobytes()
         ppm = header + data
         img_small = tk.PhotoImage(data=ppm, format="PPM")
+        if s == 1.0:
+            return img_small
+        zoom = int(round(1.0 / s))
+        img_zoom = img_small.zoom(zoom, zoom)
+        return img_zoom
 
+    def render_zbuffer_camera(self):
+        Wc, Hc = self.canvas_w, self.canvas_h
+        s = self.render_scale
+        Wr = max(1, int(Wc * s))
+        Hr = max(1, int(Hc * s))
+        zbuf = np.full((Hr, Wr), np.inf, dtype=float)
+        rgb = np.zeros((Hr, Wr, 3), dtype=np.uint8)
+        f = 1.0 / math.tan(math.radians(self.cam_fov_deg) * 0.5)
+        scale_r = self.scale * s
+        offset_r = np.array([Wr / 2.0, Hr / 2.0], dtype=float)
+
+        def to_screen_from_xy(x2, y2):
+            sx = (x2 * scale_r + offset_r[0]).astype(np.float32)
+            sy = (y2 * scale_r + offset_r[1]).astype(np.float32)
+            return sx, sy
+
+        def tri_rasterize(sx, sy, zdepth, color):
+            minx = max(int(np.floor(min(sx))), 0); maxx = min(int(np.ceil(max(sx))), Wr-1)
+            miny = max(int(np.floor(min(sy))), 0); maxy = min(int(np.ceil(max(sy))), Hr-1)
+            if minx>maxx or miny>maxy: return
+            x1, y1, z1 = sx[0], sy[0], zdepth[0]
+            x2, y2, z2 = sx[1], sy[1], zdepth[1]
+            x3, y3, z3 = sx[2], sy[2], zdepth[2]
+            denom = ( (y2 - y3)*(x1 - x3) + (x3 - x2)*(y1 - y3) )
+            if abs(denom) < 1e-8: return
+            A1 = (y2 - y3); B1 = (x3 - x2)
+            A2 = (y3 - y1); B2 = (x1 - x3)
+            Cx = x3; Cy = y3
+            for y in range(miny, maxy+1):
+                py = y + 0.5
+                for x in range(minx, maxx+1):
+                    px = x + 0.5
+                    w1 = (A1*(px - Cx) + B1*(py - Cy)) / denom
+                    w2 = (A2*(px - Cx) + B2*(py - Cy)) / denom
+                    w3 = 1.0 - w1 - w2
+                    if w1 < 0 or w2 < 0 or w3 < 0: continue
+                    z = w1*z1 + w2*z2 + w3*z3
+                    if z < zbuf[y, x]:
+                        zbuf[y, x] = z
+                        rgb[y, x] = color
+
+        def obj_color_tuple(col):
+            if isinstance(col, str) and col.startswith("#") and len(col) == 7:
+                return (int(col[1:3],16), int(col[3:5],16), int(col[5:7],16))
+            return (90,155,216)
+
+        Vview = look_at(self.cam_pos, self.cam_target, self.cam_up)
+
+        objs = [self.objA] + ([self.objB] if self.objB_enabled else [])
+        for obj in objs:
+            V = obj.V
+            N = V.shape[0]
+            hom = np.hstack([V, np.ones((N,1))])
+            eye = (Vview @ hom.T).T[:, :3]
+            ze = eye[:,2]
+            mask = ze < -1e-6
+            if not np.any(mask): continue
+            xproj = (eye[:,0] * f) / (-ze + 1e-12)
+            yproj = (eye[:,1] * f) / (-ze + 1e-12)
+            depth = -ze
+            sx_all, sy_all = to_screen_from_xy(xproj, yproj)
+            color = np.array(obj_color_tuple(obj.color), dtype=np.uint8)
+            for fce in obj.faces:
+                idx = fce.indices
+                if len(idx) < 3: continue
+                i0 = idx[0]
+                for t in range(1, len(idx)-1):
+                    i1 = idx[t]; i2 = idx[t+1]
+                    if not (mask[i0] and mask[i1] and mask[i2]): continue
+                    sx = np.array([sx_all[i0], sx_all[i1], sx_all[i2]], dtype=np.float32)
+                    sy = np.array([sy_all[i0], sy_all[i1], sy_all[i2]], dtype=np.float32)
+                    zdepth = np.array([depth[i0], depth[i1], depth[i2]], dtype=np.float32)
+                    tri_rasterize(sx, sy, zdepth, color)
+
+        header = f"P6 {Wr} {Hr} 255\n".encode("ascii")
+        data = rgb.tobytes()
+        ppm = header + data
+        img_small = tk.PhotoImage(data=ppm, format="PPM")
         if s == 1.0:
             return img_small
         zoom = int(round(1.0 / s))
@@ -736,8 +912,7 @@ class PolyhedronApp:
         if self.zbuffer_enabled:
             self.img_handle = self.render_zbuffer()
             self.canvas.create_image(0, 0, image=self.img_handle, anchor="nw")
-
-            if self.overlay_wire_enabled:
+            if self.overlay_wire_enabled and not self.camera_enabled:
                 objs = [self.objA] + ([self.objB] if self.objB_enabled else [])
                 if self.projection_mode == 'perspective':
                     for obj in objs:
@@ -760,23 +935,44 @@ class PolyhedronApp:
                             faces_to_draw = obj.faces
                         for f in faces_to_draw:
                             self._draw_face_wire(V, f, mode='ortho', outline=self.wire_on_fill_color, width=self.wire_on_fill_width)
+            if self.overlay_wire_enabled and self.camera_enabled:
+                f = 1.0 / math.tan(math.radians(self.cam_fov_deg) * 0.5)
+                Vview = look_at(self.cam_pos, self.cam_target, self.cam_up)
+                for obj in [self.objA] + ([self.objB] if self.objB_enabled else []):
+                    V = obj.V
+                    N = V.shape[0]
+                    hom = np.hstack([V, np.ones((N,1))])
+                    eye = (Vview @ hom.T).T[:, :3]
+                    for face in obj.faces:
+                        self._draw_face_wire_camera(eye, face, f)
+            return
+
+        if self.camera_enabled:
+            f = 1.0 / math.tan(math.radians(self.cam_fov_deg) * 0.5)
+            Vview = look_at(self.cam_pos, self.cam_target, self.cam_up)
+            for obj in [self.objA] + ([self.objB] if self.objB_enabled else []):
+                V = obj.V
+                N = V.shape[0]
+                hom = np.hstack([V, np.ones((N,1))])
+                eye = (Vview @ hom.T).T[:, :3]
+                for face in obj.faces:
+                    self._draw_face_wire_camera(eye, face, f)
             return
 
         objs = [self.objA] + ([self.objB] if self.objB_enabled else [])
-
         if self.projection_mode == 'perspective':
             for obj in objs:
                 V = obj.V.copy()
                 front, back = self.classify_faces_perspective(V, obj.faces)
                 def depth_key(f): return np.mean(V[np.array(f.indices), 2])
                 if not self.cull_enabled:
-                    for f in sorted(back, key=depth_key, reverse=True):
-                        self._draw_face_wire(V, f, mode='persp', outline=self.back_outline,  width=1)
-                    for f in sorted(front, key=depth_key, reverse=True):
-                        self._draw_face_wire(V, f, mode='persp', outline=self.front_outline, width=2)
+                    for fce in sorted(back, key=depth_key, reverse=True):
+                        self._draw_face_wire(V, fce, mode='persp', outline=self.back_outline,  width=1)
+                    for fce in sorted(front, key=depth_key, reverse=True):
+                        self._draw_face_wire(V, fce, mode='persp', outline=self.front_outline, width=2)
                 else:
-                    for f in sorted(front, key=depth_key, reverse=True):
-                        self._draw_face_wire(V, f, mode='persp', outline=self.front_outline, width=2)
+                    for fce in sorted(front, key=depth_key, reverse=True):
+                        self._draw_face_wire(V, fce, mode='persp', outline=self.front_outline, width=2)
         else:
             R = isometric_rotation_matrix()
             for obj in objs:
@@ -784,15 +980,34 @@ class PolyhedronApp:
                 front, back = self.classify_faces_isometric(V, obj.faces)
                 def depth_key(f): return np.mean(V[np.array(f.indices), 2])
                 if not self.cull_enabled:
-                    for f in sorted(back, key=depth_key, reverse=True):
-                        self._draw_face_wire(V, f, mode='ortho', outline=self.back_outline,  width=1)
-                    for f in sorted(front, key=depth_key, reverse=True):
-                        self._draw_face_wire(V, f, mode='ortho', outline=self.front_outline, width=2)
+                    for fce in sorted(back, key=depth_key, reverse=True):
+                        self._draw_face_wire(V, fce, mode='ortho', outline=self.back_outline,  width=1)
+                    for fce in sorted(front, key=depth_key, reverse=True):
+                        self._draw_face_wire(V, fce, mode='ortho', outline=self.front_outline, width=2)
                 else:
-                    for f in sorted(front, key=depth_key, reverse=True):
-                        self._draw_face_wire(V, f, mode='ortho', outline=self.front_outline, width=2)
+                    for fce in sorted(front, key=depth_key, reverse=True):
+                        self._draw_face_wire(V, fce, mode='ortho', outline=self.front_outline, width=2)
 
     def tick(self):
+        did_draw = False
+        if self.camera_enabled and self.cam_orbit_enabled:
+            try:
+                r = float(self.rad_e.get())
+            except Exception:
+                r = self.cam_orbit_radius
+            try:
+                spd = float(self.spd_e.get())
+            except Exception:
+                spd = self.cam_orbit_speed_deg
+            self.cam_orbit_radius = r
+            self.cam_orbit_speed_deg = spd
+            self.cam_angle_deg = (self.cam_angle_deg + self.cam_orbit_speed_deg) % 360.0
+            ang = math.radians(self.cam_angle_deg)
+            cx = self.cam_target[0] + r * math.cos(ang)
+            cz = self.cam_target[2] + r * math.sin(ang)
+            cy = self.cam_pos[1]
+            self.cam_pos = np.array([cx, cy, cz], dtype=float)
+            did_draw = True
         if self.anim_enabled:
             objs = [self.objA] + ([self.objB] if self.objB_enabled else [])
             if objs:
@@ -800,8 +1015,31 @@ class PolyhedronApp:
                 c = np.mean(allV, axis=0)
                 M = matrix_translate(-c[0], -c[1], -c[2]) @ matrix_rotate_y(math.radians(2.0)) @ matrix_translate(c[0], c[1], c[2])
                 for o in objs: o.apply_matrix(M)
-                self.draw()
+                did_draw = True
+        if did_draw:
+            self.draw()
         self.root.after(33, self.tick)
+
+    def toggle_camera(self):
+        self.camera_enabled = self.cam_enabled_var.get()
+        self.draw()
+
+    def toggle_cam_orbit(self):
+        self.cam_orbit_enabled = self.cam_orbit_var.get()
+
+    def apply_camera_params(self):
+        try:
+            cx = float(self.cx_e.get()); cy = float(self.cy_e.get()); cz = float(self.cz_e.get())
+            tx = float(self.tx_e2.get()); ty = float(self.ty_e2.get()); tz = float(self.tz_e2.get())
+            fov = float(self.fov_e.get()); rad = float(self.rad_e.get()); spd = float(self.spd_e.get())
+        except ValueError:
+            messagebox.showerror("Ошибка ввода", "Неверные параметры камеры"); return
+        self.cam_pos = np.array([cx, cy, cz], dtype=float)
+        self.cam_target = np.array([tx, ty, tz], dtype=float)
+        self.cam_fov_deg = max(5.0, min(170.0, fov))
+        self.cam_orbit_radius = max(0.1, rad)
+        self.cam_orbit_speed_deg = spd
+        self.draw()
 
 def main():
     root = tk.Tk()
@@ -811,7 +1049,7 @@ def main():
     except Exception:
         pass
     app = PolyhedronApp(root)
-    root.minsize(1220, 740)
+    root.minsize(1280, 780)
     root.mainloop()
 
 if __name__ == "__main__":
