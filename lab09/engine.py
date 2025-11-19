@@ -301,3 +301,33 @@ class Lighting:
         ambient = self.ambient_intensity
         final_intensity = ambient + self.diffuse_intensity * diffuse + specular
         return np.clip(final_intensity, 0.0, 1.0)
+        
+class Texture:
+    def __init__(self):
+        self.texture_image = None
+        self.texture_data = None
+        self.texture_width = 0
+        self.texture_height = 0
+        self.use_texture = False
+
+    def load_texture(self, path):
+        try:
+            image = Image.open(path)
+            self.texture_image = image
+            self.texture_data = image.convert("RGB").load()
+            self.texture_width, self.texture_height = image.size
+            self.use_texture = True
+            return True
+        except Exception as e:
+            print(f"Error loading texture: {e}")
+            self.use_texture = False
+            return False
+
+    def get_color(self, u, v):
+        if not self.use_texture or self.texture_data is None:
+            return (255, 255, 255)
+        x = int(u * (self.texture_width - 1))
+        y = int((1 - v) * (self.texture_height - 1))
+        x = max(0, min(x, self.texture_width - 1))
+        y = max(0, min(y, self.texture_height - 1))
+        return self.texture_data[x, y]
