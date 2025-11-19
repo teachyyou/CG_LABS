@@ -289,3 +289,15 @@ class Lighting:
         ambient = self.ambient_intensity
         final_intensity = ambient + self.diffuse_intensity * diffuse
         return np.clip(final_intensity, 0.0, 1.0)
+        
+    def phong_shading(self, normal, view_dir, position):
+        light_dir = self.light_pos - position
+        light_dir = light_dir / np.linalg.norm(light_dir)
+        diffuse = max(0.0, np.dot(normal, light_dir))
+        reflect_dir = 2 * np.dot(normal, light_dir) * normal - light_dir
+        reflect_dir = reflect_dir / (np.linalg.norm(reflect_dir) + 1e-12)
+        specular = max(0.0, np.dot(view_dir, reflect_dir))
+        specular = self.specular_intensity * (specular ** self.shininess)
+        ambient = self.ambient_intensity
+        final_intensity = ambient + self.diffuse_intensity * diffuse + specular
+        return np.clip(final_intensity, 0.0, 1.0)
