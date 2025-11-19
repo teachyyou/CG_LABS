@@ -494,7 +494,113 @@ class PolyhedronApp:
         M = matrix_rotate_axis_through_point(axis, angle, c)
         self.objA.apply_matrix(M)
         self.draw()
-        
+
+    def load_obj_dialog(self, which):
+        path = filedialog.askopenfilename(title="Открыть OBJ", filetypes=[("Wavefront OBJ", "*.obj"), ("Все файлы", "*.*")])
+        if not path: return
+        try:
+            poly = self.load_obj(path)
+        except Exception as e:
+            messagebox.showerror("Ошибка загрузки", str(e)); return
+        poly.color = self.objA.color
+        self.objA = poly
+        self.fit_in_view(); self.draw()
+
+    def save_obj_dialog(self, which):
+        path = filedialog.asksaveasfilename(defaultextension=".obj", filetypes=[("Wavefront OBJ", "*.obj"), ("Все файлы", "*.*")], title="Сохранить OBJ")
+        if not path: return
+        try:
+            self.save_obj(path, self._get_obj(which))
+        except Exception as e:
+            messagebox.showerror("Ошибка сохранения", str(e))
+
+    def load_obj(self, path):
+        verts = []; faces = []; tex_coords = []; normals = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#"): continue
+                parts = s.split(); tag = parts[0].lower()
+                if tag == "v" and len(parts) >= 4:
+                    x = float(parts[1]); y = float(parts[2]); z = float(parts[3])
+                    verts.append([x, y, z])
+                elif tag == "vt" and len(parts) >= 3:
+                    u = float(parts[1]); v = float(parts[2])
+                    tex_coords.append([u, v])
+                elif tag == "vn" and len(parts) >= 4:
+                    x = float(parts[1]); y = float(parts[2]); z = float(parts[3])
+                    normals.append([x, y, z])
+                elif tag == "f" and len(parts) >= 4:
+                    idxs = []; tex_idxs = []; norm_idxs = []
+                    for tok in parts[1:]:
+                        if "/" in tok:
+                            parts_vert = tok.split("/")
+                            vert_idx = parts_vert[0]
+                            tex_idx = parts_vert[1] if len(parts_vert) > 1 and parts_vert[1] else "0"
+                            norm_idx = parts_vert[2] if len(parts_vert) > 2 and parts_vert[2] else "0"
+                        else:
+                            vert_idx = tok; tex_idx = "0"; norm_idx = "0"
+                        if vert_idx == "" or vert_idx == "0": continue
+                        i_vert = int(vert_idx)
+                        if i_vert < 0: i_vert = len(verts) + 1 + i_vert
+                        idxs.append(i_vert - 1)
+                        if tex_idx != "0" and tex_idx != "":
+                            i_tex = int(tex_idx)
+                            if i_tex < 0: i_tex = len(tex_coords) + 1 + i_tex
+                            tex_idxs.append(i_tex - 1)
+                        else:
+                            tex_idxs.append(0)
+                        if norm_idx != "0" and norm_idx != "":
+                            i_norm = int(norm_idx)
+                            if i_norm < 0: i_norm = len(normals) + 1 + i_norm
+                            norm_idxs.append(i_norm - 1)
+                        else:
+                            norm_idxs.append(0)
+                    if len(idxs) >= 3:
+                        face = Face(idxs)
+                        if tex_idxs and len(tex_idxs) == len(idxs):
+                            face.tex_coords = [tex_coords[i] if i < len(tex_coords) else [0, 0] for i in tex_idxs]
+                        faces.append(face)
+        if len(verts) == 0 or len(faces) == 0:
+            raise ValueError("Пустая модель или отсутствуют грани")
+        vertex_normals = None
+        if normals and len(normals) > 0:
+            vertex_normals = np.array(normals, dtype=float)
+        tex_coords_array = None
+        if tex_coords and len(tex_coords) > 0:
+            tex_coords_array = np.array(tex_coords, dtype=float)
+        return Polyhedron(np.array(verts, dtype=float), faces, vertex_normals=vertex_normals, tex_coords=tex_coords_array)
+
+    def save_obj(self, path, poly: Polyhedron):
+        with open(path, "w", encoding="utf-8") as f:
+            for v in poly.V:
+                f.write(f"v {v[0]} {v[1]} {v[2]}\n")
+            if poly.tex_coords is not None:
+                for tc in poly.tex_coords:
+                    f.write(f"vt {tc[0]} {tc[1]}\n")
+            if poly.vertex_normals is not None:
+                for vn in poly.vertex_normals:
+                    f.write(f"vn {vn[0]} {vn[1]} {vn[2]}\n")
+            for face in poly.faces:
+                idxs = []
+                for i, idx in enumerate(face.indices):
+                    vert_idx = str(idx + 1)
+                    tex_idx = ""
+                    norm_idx = ""
+                    if face.tex_coords and i < len(face.tex_coords):
+                        tex_idx = str(i + 1)
+                    if poly.vertex_normals is not None:
+                        norm_idx = str(idx + 1)
+                    if tex_idx and norm_idx:
+                        idxs.append(f"{vert_idx}/{tex_idx}/{norm_idx}")
+                    elif tex_idx:
+                        idxs.append(f"{vert_idx}/{tex_idx}")
+                    elif norm_idx:
+                        idxs.append(f"{vert_idx}//{norm_idx}")
+                    else:
+                        idxs.append(vert_idx)
+                f.write("f " + " ".join(idxs) + "\n")
+
     def classify_faces_perspective(self, V_world, faces):
         cam_pos = np.array([0.0, 0.0, self.camera_distance])
         obj_center = np.mean(V_world, axis=0)
@@ -566,7 +672,20 @@ class PolyhedronApp:
             sy = float(y2[i] * self.scale + self.offset[1])
             coords.extend([sx, sy])
         self.canvas.create_polygon(coords, fill="", outline=(outline if outline is not None else self.front_outline), width=width)
-    
+
+    def _color_to_rgb(self, color):
+        if isinstance(color, str) and color.startswith("#"):
+            return (int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16))
+        return (90, 155, 216)
+
+    def _apply_lighting_to_color(self, base_color, intensity):
+        r, g, b = base_color
+        r = int(r * intensity); g = int(g * intensity); b = int(b * intensity)
+        return (max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
+
+    def _rgb_to_hex(self, rgb):
+        return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+
     def _project_point_current(self, p):
         if self.camera_enabled:
             f = 1.0 / math.tan(math.radians(self.cam_fov_deg) * 0.5)
