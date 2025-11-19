@@ -566,3 +566,424 @@ class PolyhedronApp:
             sy = float(y2[i] * self.scale + self.offset[1])
             coords.extend([sx, sy])
         self.canvas.create_polygon(coords, fill="", outline=(outline if outline is not None else self.front_outline), width=width)
+    
+    def _project_point_current(self, p):
+        if self.camera_enabled:
+            f = 1.0 / math.tan(math.radians(self.cam_fov_deg) * 0.5)
+            Vview = look_at(self.cam_pos, self.cam_target, self.cam_up)
+            hom = np.hstack([p, 1.0])
+            eye = (Vview @ hom.T).T[:3]
+            if eye[2] >= -1e-6:
+                return None
+            x2 = (eye[0] * f) / (-eye[2] + 1e-12)
+            y2 = (eye[1] * f) / (-eye[2] + 1e-12)
+            sx = float(x2 * self.scale + self.offset[0])
+            sy = float(y2 * self.scale + self.offset[1])
+            return sx, sy
+        else:
+            if self.projection_mode == 'perspective':
+                x2, y2 = project_perspective(np.array([p]), camera_distance=self.camera_distance)[0]
+            else:
+                R = isometric_rotation_matrix()
+                p = (R @ np.array(p).reshape(3, 1)).ravel()
+                x2, y2 = p[0], p[1]
+            sx = float(x2 * self.scale + self.offset[0])
+            sy = float(y2 * self.scale + self.offset[1])
+            return sx, sy
+
+    def _draw_axes(self):
+        axis_len = 2.0
+        origin = np.array([0.0, 0.0, 0.0], dtype=float)
+        axes = {
+            'X': (origin, np.array([axis_len, 0.0, 0.0], dtype=float), "#ff6b6b"),
+            'Y': (origin, np.array([0.0, axis_len, 0.0], dtype=float), "#6bff6b"),
+            'Z': (origin, np.array([0.0, 0.0, axis_len], dtype=float), "#6bb7ff"),
+        }
+        for label, (p0, p1, color) in axes.items():
+            s0 = self._project_point_current(p0)
+            s1 = self._project_point_current(p1)
+            if s0 is None or s1 is None:
+                continue
+            x0, y0 = s0; x1, y1 = s1
+            self.canvas.create_line(x0, y0, x1, y1, fill=color, dash=(4, 3), width=1)
+            self.canvas.create_text(x1 + 8, y1, text=label, fill=color, anchor="w", font=("TkDefaultFont", 10, "bold"))
+
+    def render_zbuffer(self):
+        if self.camera_enabled:
+            return self.render_zbuffer_camera()
+        Wc, Hc = self.canvas_w, self.canvas_h
+        s = self.render_scale
+        Wr = max(1, int(Wc * s))
+        Hr = max(1, int(Hc * s))
+        zbuf = np.full((Hr, Wr), np.inf, dtype=float)
+        rgb = np.zeros((Hr, Wr, 3), dtype=np.uint8)
+        d = self.camera_distance
+        scale_r = self.scale * s
+        offset_r = np.array([Wr / 2.0, Hr / 2.0], dtype=float)
+
+        def to_screen(pts2):
+            sx = (pts2[:, 0] * scale_r + offset_r[0]).astype(np.float32)
+            sy = (pts2[:, 1] * scale_r + offset_r[1]).astype(np.float32)
+            return sx, sy
+
+        def tri_rasterize(sx, sy, zdepth, color, tex_coords=None, normals=None, positions=None):
+            minx = max(int(np.floor(min(sx))), 0); maxx = min(int(np.ceil(max(sx))), Wr - 1)
+            miny = max(int(np.floor(min(sy))), 0); maxy = min(int(np.ceil(max(sy))), Hr - 1)
+            if minx > maxx or miny > maxy: return
+            x1, y1, z1 = sx[0], sy[0], zdepth[0]
+            x2, y2, z2 = sx[1], sy[1], zdepth[1]
+            x3, y3, z3 = sx[2], sy[2], zdepth[2]
+            denom = ((y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3))
+            if abs(denom) < 1e-8: return
+            A1 = (y2 - y3); B1 = (x3 - x2)
+            A2 = (y3 - y1); B2 = (x1 - x3)
+            Cx = x3; Cy = y3
+            for y in range(miny, maxy + 1):
+                py = y + 0.5
+                for x in range(minx, maxx + 1):
+                    px = x + 0.5
+                    w1 = (A1 * (px - Cx) + B1 * (py - Cy)) / denom
+                    w2 = (A2 * (px - Cx) + B2 * (py - Cy)) / denom
+                    w3 = 1.0 - w1 - w2
+                    if w1 < 0 or w2 < 0 or w3 < 0: continue
+                    z = w1 * z1 + w2 * z2 + w3 * z3
+                    if z < zbuf[y, x]:
+                        zbuf[y, x] = z
+                        if self.shading_mode == 'phong' and normals is not None and positions is not None:
+                            interp_normal = w1 * normals[0] + w2 * normals[1] + w3 * normals[2]
+                            nrm = np.linalg.norm(interp_normal)
+                            if nrm > 0: interp_normal = interp_normal / nrm
+                            interp_pos = w1 * positions[0] + w2 * positions[1] + w3 * positions[2]
+                            view_dir = -interp_pos / (np.linalg.norm(interp_pos) + 1e-12)
+                            intensity = self.lighting.phong_shading(interp_normal, view_dir, interp_pos)
+                            final_color = self._apply_lighting_to_color(color, intensity)
+                        elif self.shading_mode == 'gouraud' and normals is not None:
+                            i1 = self.lighting.lambert_shading(normals[0])
+                            i2 = self.lighting.lambert_shading(normals[1])
+                            i3 = self.lighting.lambert_shading(normals[2])
+                            interp_intensity = w1 * i1 + w2 * i2 + w3 * i3
+                            final_color = self._apply_lighting_to_color(color, interp_intensity)
+                        else:
+                            final_color = color
+                        if self.texture.use_texture and tex_coords is not None:
+                            u = w1 * tex_coords[0][0] + w2 * tex_coords[1][0] + w3 * tex_coords[2][0]
+                            v = w1 * tex_coords[0][1] + w2 * tex_coords[1][1] + w3 * tex_coords[2][1]
+                            tex_color = self.texture.get_color(u, v)
+                            if self.shading_mode != 'none':
+                                if self.shading_mode == 'phong' and normals is not None and positions is not None:
+                                    intensity = self.lighting.phong_shading(interp_normal, view_dir, interp_pos)
+                                elif self.shading_mode == 'gouraud' and normals is not None:
+                                    intensity = interp_intensity
+                                else:
+                                    intensity = 1.0
+                                tex_color = (int(tex_color[0] * intensity), int(tex_color[1] * intensity), int(tex_color[2] * intensity))
+                            rgb[y, x] = tex_color
+                        else:
+                            rgb[y, x] = final_color
+
+        obj = self.objA
+        V = obj.V.copy()
+        if self.projection_mode == 'perspective':
+            pts2 = project_perspective(V, camera_distance=d)
+            depth = (d - V[:, 2])
+        else:
+            R = isometric_rotation_matrix()
+            V = (R @ V.T).T
+            pts2 = project_orthographic(V)
+            depth = (-V[:, 2])
+        sx_all, sy_all = to_screen(pts2)
+        base_color = self._color_to_rgb(obj.color)
+        for f in obj.faces:
+            idx = f.indices
+            if len(idx) < 3: continue
+            i0 = idx[0]
+            for t in range(1, len(idx) - 1):
+                i1 = idx[t]; i2 = idx[t + 1]
+                sx = np.array([sx_all[i0], sx_all[i1], sx_all[i2]], dtype=np.float32)
+                sy = np.array([sy_all[i0], sy_all[i1], sy_all[i2]], dtype=np.float32)
+                zdepth = np.array([depth[i0], depth[i1], depth[i2]], dtype=np.float32)
+                tex_coords = None; normals = None; positions = None
+                if f.tex_coords and len(f.tex_coords) >= len(idx):
+                    tex_coords = [f.tex_coords[0], f.tex_coords[t], f.tex_coords[t + 1]]
+                if obj.vertex_normals is not None:
+                    normals = [obj.vertex_normals[i0], obj.vertex_normals[i1], obj.vertex_normals[i2]]
+                if self.shading_mode == 'phong':
+                    positions = [V[i0], V[i1], V[i2]]
+                tri_rasterize(sx, sy, zdepth, base_color, tex_coords, normals, positions)
+        header = f"P6 {Wr} {Hr} 255\n".encode("ascii")
+        data = rgb.tobytes()
+        ppm = header + data
+        img_small = tk.PhotoImage(data=ppm, format="PPM")
+        if s == 1.0:
+            return img_small
+        zoom = int(round(1.0 / s))
+        img_zoom = img_small.zoom(zoom, zoom)
+        return img_zoom
+
+    def render_zbuffer_camera(self):
+        Wc, Hc = self.canvas_w, self.canvas_h
+        s = self.render_scale
+        Wr = max(1, int(Wc * s))
+        Hr = max(1, int(Hc * s))
+        zbuf = np.full((Hr, Wr), np.inf, dtype=float)
+        rgb = np.zeros((Hr, Wr, 3), dtype=np.uint8)
+        f = 1.0 / math.tan(math.radians(self.cam_fov_deg) * 0.5)
+        scale_r = self.scale * s
+        offset_r = np.array([Wr / 2.0, Hr / 2.0], dtype=float)
+
+        def to_screen_from_xy(x2, y2):
+            sx = (x2 * scale_r + offset_r[0]).astype(np.float32)
+            sy = (y2 * scale_r + offset_r[1]).astype(np.float32)
+            return sx, sy
+
+        def tri_rasterize(sx, sy, zdepth, color, tex_coords=None, normals=None, positions=None):
+            minx = max(int(np.floor(min(sx))), 0); maxx = min(int(np.ceil(max(sx))), Wr - 1)
+            miny = max(int(np.floor(min(sy))), 0); maxy = min(int(np.ceil(max(sy))), Hr - 1)
+            if minx > maxx or miny > maxy: return
+            x1, y1, z1 = sx[0], sy[0], zdepth[0]
+            x2, y2, z2 = sx[1], sy[1], zdepth[1]
+            x3, y3, z3 = sx[2], sy[2], zdepth[2]
+            denom = ((y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3))
+            if abs(denom) < 1e-8: return
+            A1 = (y2 - y3); B1 = (x3 - x2)
+            A2 = (y3 - y1); B2 = (x1 - x3)
+            Cx = x3; Cy = y3
+            for y in range(miny, maxy + 1):
+                py = y + 0.5
+                for x in range(minx, maxx + 1):
+                    px = x + 0.5
+                    w1 = (A1 * (px - Cx) + B1 * (py - Cy)) / denom
+                    w2 = (A2 * (px - Cx) + B2 * (py - Cy)) / denom
+                    w3 = 1.0 - w1 - w2
+                    if w1 < 0 or w2 < 0 or w3 < 0: continue
+                    z = w1 * z1 + w2 * z2 + w3 * z3
+                    if z < zbuf[y, x]:
+                        zbuf[y, x] = z
+                        if self.shading_mode == 'phong' and normals is not None and positions is not None:
+                            interp_normal = w1 * normals[0] + w2 * normals[1] + w3 * normals[2]
+                            nrmv = np.linalg.norm(interp_normal)
+                            if nrmv > 0: interp_normal = interp_normal / nrmv
+                            view_dir = -positions[0] / (np.linalg.norm(positions[0]) + 1e-12)
+                            intensity = self.lighting.phong_shading(interp_normal, view_dir, positions[0])
+                            final_color = self._apply_lighting_to_color(color, intensity)
+                        elif self.shading_mode == 'gouraud' and normals is not None:
+                            i1 = self.lighting.lambert_shading(normals[0])
+                            i2 = self.lighting.lambert_shading(normals[1])
+                            i3 = self.lighting.lambert_shading(normals[2])
+                            interp_intensity = w1 * i1 + w2 * i2 + w3 * i3
+                            final_color = self._apply_lighting_to_color(color, interp_intensity)
+                        else:
+                            final_color = color
+                        if self.texture.use_texture and tex_coords is not None:
+                            u = w1 * tex_coords[0][0] + w2 * tex_coords[1][0] + w3 * tex_coords[2][0]
+                            v = w1 * tex_coords[0][1] + w2 * tex_coords[1][1] + w3 * tex_coords[2][1]
+                            tex_color = self.texture.get_color(u, v)
+                            if self.shading_mode != 'none':
+                                if self.shading_mode == 'phong' and normals is not None and positions is not None:
+                                    intensity = self.lighting.phong_shading(interp_normal, view_dir, positions[0])
+                                elif self.shading_mode == 'gouraud' and normals is not None:
+                                    intensity = interp_intensity
+                                else:
+                                    intensity = 1.0
+                                tex_color = (int(tex_color[0] * intensity), int(tex_color[1] * intensity), int(tex_color[2] * intensity))
+                            rgb[y, x] = tex_color
+                        else:
+                            rgb[y, x] = final_color
+
+        Vview = look_at(self.cam_pos, self.cam_target, self.cam_up)
+        obj = self.objA
+        V = obj.V
+        N = V.shape[0]
+        hom = np.hstack([V, np.ones((N, 1))])
+        eye = (Vview @ hom.T).T[:, :3]
+        ze = eye[:, 2]
+        mask = ze < -1e-6
+        if np.any(mask):
+            xproj = (eye[:, 0] * f) / (-ze + 1e-12)
+            yproj = (eye[:, 1] * f) / (-ze + 1e-12)
+            depth = -ze
+            sx_all, sy_all = to_screen_from_xy(xproj, yproj)
+            base_color = self._color_to_rgb(obj.color)
+            for fce in obj.faces:
+                idx = fce.indices
+                if len(idx) < 3: continue
+                i0 = idx[0]
+                for t in range(1, len(idx) - 1):
+                    i1 = idx[t]; i2 = idx[t + 1]
+                    if not (mask[i0] and mask[i1] and mask[i2]): continue
+                    sx = np.array([sx_all[i0], sx_all[i1], sx_all[i2]], dtype=np.float32)
+                    sy = np.array([sy_all[i0], sy_all[i1], sy_all[i2]], dtype=np.float32)
+                    zdepth = np.array([depth[i0], depth[i1], depth[i2]], dtype=np.float32)
+                    tex_coords = None; normals = None; positions = None
+                    if fce.tex_coords and len(fce.tex_coords) >= len(idx):
+                        tex_coords = [fce.tex_coords[0], fce.tex_coords[t], fce.tex_coords[t + 1]]
+                    if obj.vertex_normals is not None:
+                        normals = [obj.vertex_normals[i0], obj.vertex_normals[i1], obj.vertex_normals[i2]]
+                    if self.shading_mode == 'phong':
+                        positions = [eye[i0], eye[i1], eye[i2]]
+                    tri_rasterize(sx, sy, zdepth, base_color, tex_coords, normals, positions)
+        header = f"P6 {Wr} {Hr} 255\n".encode("ascii")
+        data = rgb.tobytes()
+        ppm = header + data
+        img_small = tk.PhotoImage(data=ppm, format="PPM")
+        if s == 1.0:
+            return img_small
+        zoom = int(round(1.0 / s))
+        img_zoom = img_small.zoom(zoom, zoom)
+        return img_zoom
+
+    def draw(self):
+        self.canvas.delete("all")
+        self._draw_axes()
+        if self.zbuffer_enabled:
+            self.img_handle = self.render_zbuffer()
+            self.canvas.create_image(0, 0, image=self.img_handle, anchor="nw")
+            if self.overlay_wire_enabled and not self.camera_enabled:
+                obj = self.objA
+                V = obj.V.copy()
+                if self.projection_mode == 'perspective':
+                    if self.overlay_wire_front_only:
+                        front, _ = self.classify_faces_perspective(V, obj.faces)
+                        for f in front:
+                            self._draw_face_wire(V, f, mode='persp', outline=self.wire_on_fill_color, width=self.wire_on_fill_width)
+                    else:
+                        front, back = self.classify_faces_perspective(V, obj.faces)
+                        for f in back:
+                            self._draw_face_wire(V, f, mode='persp', outline=self.back_outline, width=1)
+                        for f in front:
+                            self._draw_face_wire(V, f, mode='persp', outline=self.wire_on_fill_color, width=self.wire_on_fill_width)
+                else:
+                    R = isometric_rotation_matrix()
+                    V = (R @ obj.V.T).T
+                    if self.overlay_wire_front_only:
+                        front, _ = self.classify_faces_isometric(V, obj.faces)
+                        for f in front:
+                            self._draw_face_wire(V, f, mode='ortho', outline=self.wire_on_fill_color, width=self.wire_on_fill_width)
+                    else:
+                        front, back = self.classify_faces_isometric(V, obj.faces)
+                        for f in back:
+                            self._draw_face_wire(V, f, mode='ortho', outline=self.back_outline, width=1)
+                        for f in front:
+                            self._draw_face_wire(V, f, mode='ortho', outline=self.wire_on_fill_color, width=self.wire_on_fill_width)
+            if self.overlay_wire_enabled and self.camera_enabled:
+                f = 1.0 / math.tan(math.radians(self.cam_fov_deg) * 0.5)
+                Vview = look_at(self.cam_pos, self.cam_target, self.cam_up)
+                obj = self.objA
+                V = obj.V
+                hom = np.hstack([V, np.ones((V.shape[0], 1))])
+                eye = (Vview @ hom.T).T[:, :3]
+                if self.overlay_wire_front_only:
+                    front, _ = self.classify_faces_camera(eye, obj.faces)
+                    for face in front:
+                        self._draw_face_wire_camera(eye, face, f, outline=self.wire_on_fill_color, width=self.wire_on_fill_width)
+                else:
+                    front, back = self.classify_faces_camera(eye, obj.faces)
+                    for face in back:
+                        self._draw_face_wire_camera(eye, face, f, outline=self.back_outline, width=1)
+                    for face in front:
+                        self._draw_face_wire_camera(eye, face, f, outline=self.wire_on_fill_color, width=self.wire_on_fill_width)
+            return
+        if self.camera_enabled:
+            f = 1.0 / math.tan(math.radians(self.cam_fov_deg) * 0.5)
+            Vview = look_at(self.cam_pos, self.cam_target, self.cam_up)
+            obj = self.objA
+            V = obj.V
+            hom = np.hstack([V, np.ones((V.shape[0], 1))])
+            eye = (Vview @ hom.T).T[:, :3]
+            front, back = self.classify_faces_camera(eye, obj.faces)
+            def depth_key(face):
+                return np.mean(eye[np.array(face.indices), 2])
+            if not self.cull_enabled:
+                for face in sorted(back, key=depth_key, reverse=True):
+                    self._draw_face_wire_camera(eye, face, f, outline=self.back_outline, width=1)
+                for face in sorted(front, key=depth_key, reverse=True):
+                    self._draw_face_wire_camera(eye, face, f, outline=self.front_outline, width=2)
+            else:
+                for face in sorted(front, key=depth_key, reverse=True):
+                    self._draw_face_wire_camera(eye, face, f, outline=self.front_outline, width=2)
+            return
+        obj = self.objA
+        if self.projection_mode == 'perspective':
+            V = obj.V.copy()
+            front, back = self.classify_faces_perspective(V, obj.faces)
+            def depth_key(fa): return np.mean(V[np.array(fa.indices), 2])
+            if not self.cull_enabled:
+                for fce in sorted(back, key=depth_key, reverse=True):
+                    self._draw_face_wire(V, fce, mode='persp', outline=self.back_outline, width=1)
+                for fce in sorted(front, key=depth_key, reverse=True):
+                    self._draw_face_wire(V, fce, mode='persp', outline=self.front_outline, width=2)
+            else:
+                for fce in sorted(front, key=depth_key, reverse=True):
+                    self._draw_face_wire(V, fce, mode='persp', outline=self.front_outline, width=2)
+        else:
+            R = isometric_rotation_matrix()
+            V = (R @ obj.V.T).T
+            front, back = self.classify_faces_isometric(V, obj.faces)
+            def depth_key(fa): return np.mean(V[np.array(fa.indices), 2])
+            if not self.cull_enabled:
+                for fce in sorted(back, key=depth_key, reverse=True):
+                    self._draw_face_wire(V, fce, mode='ortho', outline=self.back_outline, width=1)
+                for fce in sorted(front, key=depth_key, reverse=True):
+                    self._draw_face_wire(V, fce, mode='ortho', outline=self.front_outline, width=2)
+            else:
+                for fce in sorted(front, key=depth_key, reverse=True):
+                    self._draw_face_wire(V, fce, mode='ortho', outline=self.front_outline, width=2)
+
+    def tick(self):
+        did_draw = False
+        if self.camera_enabled and self.cam_orbit_enabled:
+            try:
+                r = float(self.rad_e.get())
+            except Exception:
+                r = self.cam_orbit_radius
+            try:
+                spd = float(self.spd_e.get())
+            except Exception:
+                spd = self.cam_orbit_speed_deg
+            self.cam_orbit_radius = r
+            self.cam_orbit_speed_deg = spd
+            self.cam_angle_deg = (self.cam_angle_deg + self.cam_orbit_speed_deg) % 360.0
+            ang = math.radians(self.cam_angle_deg)
+            cx = self.cam_target[0] + r * math.cos(ang)
+            cz = self.cam_target[2] + r * math.sin(ang)
+            cy = self.cam_pos[1]
+            self.cam_pos = np.array([cx, cy, cz], dtype=float)
+            did_draw = True
+        if self.light_orbit_enabled:
+            self.light_orbit_angle_deg = (self.light_orbit_angle_deg + 12.0) % 360.0
+            ang = math.radians(self.light_orbit_angle_deg)
+            lx = self.light_orbit_radius * math.cos(ang)
+            lz = self.light_orbit_radius * math.sin(ang)
+            ly = self.light_orbit_y
+            self.lighting.light_pos = np.array([lx, ly, lz], dtype=float)
+            did_draw = True
+        if self.anim_enabled:
+            allV = self.objA.V
+            c = np.mean(allV, axis=0)
+            M = matrix_translate(-c[0], -c[1], -c[2]) @ matrix_rotate_y(math.radians(2.0)) @ matrix_translate(c[0], c[1], c[2])
+            self.objA.apply_matrix(M)
+            did_draw = True
+        if did_draw:
+            self.draw()
+        self.root.after(33, self.tick)
+
+    def toggle_camera(self):
+        self.camera_enabled = self.cam_enabled_var.get()
+        self.draw()
+
+    def toggle_cam_orbit(self):
+        self.cam_orbit_enabled = self.cam_orbit_var.get()
+
+    def apply_camera_params(self):
+        try:
+            cx = float(self.cx_e.get()); cy = float(self.cy_e.get()); cz = float(self.cz_e.get())
+            tx = float(self.tx_e2.get()); ty = float(self.ty_e2.get()); tz = float(self.tz_e2.get())
+            fov = float(self.fov_e.get()); rad = float(self.rad_e.get()); spd = float(self.spd_e.get())
+        except ValueError:
+            messagebox.showerror("Ошибка ввода", "Неверные параметры камеры"); return
+        self.cam_pos = np.array([cx, cy, cz], dtype=float)
+        self.cam_target = np.array([tx, ty, tz], dtype=float)
+        self.cam_fov_deg = max(5.0, min(170.0, fov))
+        self.cam_orbit_radius = max(0.1, rad)
+        self.cam_orbit_speed_deg = spd
+        self.draw()
