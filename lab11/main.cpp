@@ -6,11 +6,16 @@
 #include <vector>
 #include <cmath>
 
-GLuint Program;
-GLint  Attrib_vertex;
+GLuint ProgramConst;
+GLuint ProgramUniform;
+GLint  Attrib_vertex_const;
+GLint  Attrib_vertex_uniform;
+GLint  Uniform_color;
 GLuint VBO_quad;
 GLuint VBO_fan;
 GLuint VBO_pentagon;
+
+bool useUniformColor = true;
 
 struct Vertex {
     GLfloat x;
@@ -30,11 +35,20 @@ const char* VertexShaderSource = R"(
     }
 )";
 
-const char* FragShaderSource = R"(
+const char* FragShaderSourceConst = R"(
     #version 330 core
     out vec4 color;
     void main() {
-        color = vec4(0, 1, 0, 1);
+        color = vec4(1, 0, 0, 1);
+    }
+)";
+
+const char* FragShaderSourceUniform = R"(
+    #version 330 core
+    uniform vec4 uColor;
+    out vec4 color;
+    void main() {
+        color = uColor;
     }
 )";
 
@@ -42,6 +56,8 @@ void Init();
 void InitVBO();
 void InitShader();
 void Draw();
+void DrawConst();
+void DrawUniform();
 void Release();
 void ReleaseShader();
 void ReleaseVBO();
@@ -151,62 +167,114 @@ void InitVBO() {
     checkOpenGLerror();
 }
 
-
 void InitShader() {
     GLuint vShader = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vShader, 1, &VertexShaderSource, nullptr);
     glCompileShader(vShader);
     ShaderLog(vShader);
 
-    GLuint fShader = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fShader, 1, &FragShaderSource, nullptr);
-    glCompileShader(fShader);
-    ShaderLog(fShader);
+    GLuint fShaderConst = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fShaderConst, 1, &FragShaderSourceConst, nullptr);
+    glCompileShader(fShaderConst);
+    ShaderLog(fShaderConst);
 
-    Program = glCreateProgram();
-    glAttachShader(Program, vShader);
-    glAttachShader(Program, fShader);
-    glLinkProgram(Program);
+    GLuint fShaderUniform = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fShaderUniform, 1, &FragShaderSourceUniform, nullptr);
+    glCompileShader(fShaderUniform);
+    ShaderLog(fShaderUniform);
 
+    ProgramConst = glCreateProgram();
+    glAttachShader(ProgramConst, vShader);
+    glAttachShader(ProgramConst, fShaderConst);
+    glLinkProgram(ProgramConst);
     GLint link_ok = GL_FALSE;
-    glGetProgramiv(Program, GL_LINK_STATUS, &link_ok);
+    glGetProgramiv(ProgramConst, GL_LINK_STATUS, &link_ok);
     if (!link_ok) {
-        std::cout << "error attach shaders\n";
+        std::cout << "error attach shaders const\n";
+        return;
+    }
+
+    ProgramUniform = glCreateProgram();
+    glAttachShader(ProgramUniform, vShader);
+    glAttachShader(ProgramUniform, fShaderUniform);
+    glLinkProgram(ProgramUniform);
+    link_ok = GL_FALSE;
+    glGetProgramiv(ProgramUniform, GL_LINK_STATUS, &link_ok);
+    if (!link_ok) {
+        std::cout << "error attach shaders uniform\n";
         return;
     }
 
     glDeleteShader(vShader);
-    glDeleteShader(fShader);
+    glDeleteShader(fShaderConst);
+    glDeleteShader(fShaderUniform);
 
     const char* attr_name = "coord";
-    Attrib_vertex = glGetAttribLocation(Program, attr_name);
-    if (Attrib_vertex == -1) {
-        std::cout << "could not bind attrib " << attr_name << std::endl;
+    Attrib_vertex_const = glGetAttribLocation(ProgramConst, attr_name);
+    Attrib_vertex_uniform = glGetAttribLocation(ProgramUniform, attr_name);
+    if (Attrib_vertex_const == -1 || Attrib_vertex_uniform == -1) {
+        std::cout << "could not bind attrib coord\n";
         return;
     }
+
+    Uniform_color = glGetUniformLocation(ProgramUniform, "uColor");
 
     checkOpenGLerror();
 }
 
 void Draw() {
-    glUseProgram(Program);
-    glEnableVertexAttribArray(Attrib_vertex);
+    if (useUniformColor)
+        DrawUniform();
+    else
+        DrawConst();
+}
+
+void DrawConst() {
+    glUseProgram(ProgramConst);
+    glEnableVertexAttribArray(Attrib_vertex_const);
 
     glBindBuffer(GL_ARRAY_BUFFER, VBO_quad);
-    glVertexAttribPointer(Attrib_vertex, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    glVertexAttribPointer(Attrib_vertex_const, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
     glDrawArrays(GL_TRIANGLES, 0, QUAD_VERTEX_COUNT);
 
     glBindBuffer(GL_ARRAY_BUFFER, VBO_fan);
-    glVertexAttribPointer(Attrib_vertex, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    glVertexAttribPointer(Attrib_vertex_const, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
     glDrawArrays(GL_TRIANGLE_FAN, 0, FAN_VERTEX_COUNT);
 
     glBindBuffer(GL_ARRAY_BUFFER, VBO_pentagon);
-    glVertexAttribPointer(Attrib_vertex, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    glVertexAttribPointer(Attrib_vertex_const, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
     glDrawArrays(GL_TRIANGLE_FAN, 0, PENTAGON_VERTEX_COUNT);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    glDisableVertexAttribArray(Attrib_vertex);
+    glDisableVertexAttribArray(Attrib_vertex_const);
+    glUseProgram(0);
+
+    checkOpenGLerror();
+}
+
+void DrawUniform() {
+    glUseProgram(ProgramUniform);
+    glEnableVertexAttribArray(Attrib_vertex_uniform);
+
+    glBindBuffer(GL_ARRAY_BUFFER, VBO_quad);
+    glVertexAttribPointer(Attrib_vertex_uniform, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    glUniform4f(Uniform_color, 1.f, 0.f, 0.f, 1.f);
+    glDrawArrays(GL_TRIANGLES, 0, QUAD_VERTEX_COUNT);
+
+    glBindBuffer(GL_ARRAY_BUFFER, VBO_fan);
+    glVertexAttribPointer(Attrib_vertex_uniform, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    glUniform4f(Uniform_color, 0.f, 1.f, 0.f, 1.f);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, FAN_VERTEX_COUNT);
+
+    glBindBuffer(GL_ARRAY_BUFFER, VBO_pentagon);
+    glVertexAttribPointer(Attrib_vertex_uniform, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    glUniform4f(Uniform_color, 0.f, 0.f, 1.f, 1.f);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, PENTAGON_VERTEX_COUNT);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    glDisableVertexAttribArray(Attrib_vertex_uniform);
     glUseProgram(0);
 
     checkOpenGLerror();
@@ -219,9 +287,13 @@ void Release() {
 
 void ReleaseShader() {
     glUseProgram(0);
-    if (Program != 0) {
-        glDeleteProgram(Program);
-        Program = 0;
+    if (ProgramConst != 0) {
+        glDeleteProgram(ProgramConst);
+        ProgramConst = 0;
+    }
+    if (ProgramUniform != 0) {
+        glDeleteProgram(ProgramUniform);
+        ProgramUniform = 0;
     }
 }
 
