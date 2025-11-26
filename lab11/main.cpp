@@ -8,14 +8,20 @@
 
 GLuint ProgramConst;
 GLuint ProgramUniform;
+GLuint ProgramGradient;
 GLint  Attrib_vertex_const;
 GLint  Attrib_vertex_uniform;
+GLint  Attrib_vertex_gradient;
+GLint  Attrib_color_gradient;
 GLint  Uniform_color;
 GLuint VBO_quad;
 GLuint VBO_fan;
 GLuint VBO_pentagon;
+GLuint VBO_quad_color;
+GLuint VBO_fan_color;
+GLuint VBO_pentagon_color;
 
-bool useUniformColor = true;
+int drawMode = 0;
 
 struct Vertex {
     GLfloat x;
@@ -32,6 +38,17 @@ const char* VertexShaderSource = R"(
     in vec2 coord;
     void main() {
         gl_Position = vec4(coord, 0.0, 1.0);
+    }
+)";
+
+const char* VertexShaderSourceGradient = R"(
+    #version 330 core
+    in vec2 coord;
+    in vec3 inColor;
+    out vec3 vColor;
+    void main() {
+        gl_Position = vec4(coord, 0.0, 1.0);
+        vColor = inColor;
     }
 )";
 
@@ -52,12 +69,22 @@ const char* FragShaderSourceUniform = R"(
     }
 )";
 
+const char* FragShaderSourceGradient = R"(
+    #version 330 core
+    in vec3 vColor;
+    out vec4 color;
+    void main() {
+        color = vec4(vColor, 1.0);
+    }
+)";
+
 void Init();
 void InitVBO();
 void InitShader();
 void Draw();
 void DrawConst();
 void DrawUniform();
+void DrawGradient();
 void Release();
 void ReleaseShader();
 void ReleaseVBO();
@@ -93,9 +120,16 @@ int main() {
                 window.close();
             } else if (event.type == sf::Event::Resized) {
                 glViewport(0, 0, event.size.width, event.size.height);
-            } else if (event.type == sf::Event::KeyPressed &&
-                       event.key.code == sf::Keyboard::Escape) {
-                window.close();
+            } else if (event.type == sf::Event::KeyPressed) {
+                if (event.key.code == sf::Keyboard::Escape) {
+                    window.close();
+                } else if (event.key.code == sf::Keyboard::Num1) {
+                    drawMode = 0;
+                } else if (event.key.code == sf::Keyboard::Num2) {
+                    drawMode = 1;
+                } else if (event.key.code == sf::Keyboard::Num3) {
+                    drawMode = 2;
+                }
             }
         }
 
@@ -162,6 +196,46 @@ void InitVBO() {
     glBindBuffer(GL_ARRAY_BUFFER, VBO_pentagon);
     glBufferData(GL_ARRAY_BUFFER, sizeof(pentagon), pentagon, GL_STATIC_DRAW);
 
+    GLfloat quadColors[QUAD_VERTEX_COUNT * 3] = {
+        1.f, 0.f, 0.f,
+        0.f, 1.f, 0.f,
+        0.f, 0.f, 1.f,
+        0.f, 1.f, 0.f,
+        1.f, 1.f, 0.f,
+        0.f, 0.f, 1.f
+    };
+    glGenBuffers(1, &VBO_quad_color);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO_quad_color);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadColors), quadColors, GL_STATIC_DRAW);
+
+    GLfloat fanColors[FAN_VERTEX_COUNT * 3];
+    fanColors[0] = 1.f; fanColors[1] = 1.f; fanColors[2] = 1.f;
+    for (int i = 0; i < FAN_OUTER_COUNT; ++i) {
+        float t = static_cast<float>(i) / static_cast<float>(FAN_OUTER_COUNT - 1);
+        fanColors[(i + 1) * 3 + 0] = 1.f - t;
+        fanColors[(i + 1) * 3 + 1] = t;
+        fanColors[(i + 1) * 3 + 2] = 0.5f;
+    }
+    glGenBuffers(1, &VBO_fan_color);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO_fan_color);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(fanColors), fanColors, GL_STATIC_DRAW);
+
+    GLfloat pentagonColors[PENTAGON_VERTEX_COUNT * 3];
+    pentagonColors[0] = 1.f; pentagonColors[1] = 1.f; pentagonColors[2] = 1.f;
+    for (int i = 0; i < 5; ++i) {
+        float t = static_cast<float>(i) / 4.f;
+        pentagonColors[(i + 1) * 3 + 0] = t;
+        pentagonColors[(i + 1) * 3 + 1] = 0.f;
+        pentagonColors[(i + 1) * 3 + 2] = 1.f - t;
+    }
+    pentagonColors[6 * 3 + 0] = pentagonColors[1 * 3 + 0];
+    pentagonColors[6 * 3 + 1] = pentagonColors[1 * 3 + 1];
+    pentagonColors[6 * 3 + 2] = pentagonColors[1 * 3 + 2];
+
+    glGenBuffers(1, &VBO_pentagon_color);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO_pentagon_color);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(pentagonColors), pentagonColors, GL_STATIC_DRAW);
+
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
     checkOpenGLerror();
@@ -173,6 +247,11 @@ void InitShader() {
     glCompileShader(vShader);
     ShaderLog(vShader);
 
+    GLuint vShaderGradient = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vShaderGradient, 1, &VertexShaderSourceGradient, nullptr);
+    glCompileShader(vShaderGradient);
+    ShaderLog(vShaderGradient);
+
     GLuint fShaderConst = glCreateShader(GL_FRAGMENT_SHADER);
     glShaderSource(fShaderConst, 1, &FragShaderSourceConst, nullptr);
     glCompileShader(fShaderConst);
@@ -182,6 +261,11 @@ void InitShader() {
     glShaderSource(fShaderUniform, 1, &FragShaderSourceUniform, nullptr);
     glCompileShader(fShaderUniform);
     ShaderLog(fShaderUniform);
+
+    GLuint fShaderGradient = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fShaderGradient, 1, &FragShaderSourceGradient, nullptr);
+    glCompileShader(fShaderGradient);
+    ShaderLog(fShaderGradient);
 
     ProgramConst = glCreateProgram();
     glAttachShader(ProgramConst, vShader);
@@ -205,15 +289,32 @@ void InitShader() {
         return;
     }
 
+    ProgramGradient = glCreateProgram();
+    glAttachShader(ProgramGradient, vShaderGradient);
+    glAttachShader(ProgramGradient, fShaderGradient);
+    glLinkProgram(ProgramGradient);
+    link_ok = GL_FALSE;
+    glGetProgramiv(ProgramGradient, GL_LINK_STATUS, &link_ok);
+    if (!link_ok) {
+        std::cout << "error attach shaders gradient\n";
+        return;
+    }
+
     glDeleteShader(vShader);
+    glDeleteShader(vShaderGradient);
     glDeleteShader(fShaderConst);
     glDeleteShader(fShaderUniform);
+    glDeleteShader(fShaderGradient);
 
     const char* attr_name = "coord";
     Attrib_vertex_const = glGetAttribLocation(ProgramConst, attr_name);
     Attrib_vertex_uniform = glGetAttribLocation(ProgramUniform, attr_name);
-    if (Attrib_vertex_const == -1 || Attrib_vertex_uniform == -1) {
-        std::cout << "could not bind attrib coord\n";
+    Attrib_vertex_gradient = glGetAttribLocation(ProgramGradient, attr_name);
+    Attrib_color_gradient = glGetAttribLocation(ProgramGradient, "inColor");
+
+    if (Attrib_vertex_const == -1 || Attrib_vertex_uniform == -1 ||
+        Attrib_vertex_gradient == -1 || Attrib_color_gradient == -1) {
+        std::cout << "could not bind attribs\n";
         return;
     }
 
@@ -223,10 +324,12 @@ void InitShader() {
 }
 
 void Draw() {
-    if (useUniformColor)
+    if (drawMode == 0)
+        DrawConst();
+    else if (drawMode == 1)
         DrawUniform();
     else
-        DrawConst();
+        DrawGradient();
 }
 
 void DrawConst() {
@@ -280,6 +383,38 @@ void DrawUniform() {
     checkOpenGLerror();
 }
 
+void DrawGradient() {
+    glUseProgram(ProgramGradient);
+    glEnableVertexAttribArray(Attrib_vertex_gradient);
+    glEnableVertexAttribArray(Attrib_color_gradient);
+
+    glBindBuffer(GL_ARRAY_BUFFER, VBO_quad);
+    glVertexAttribPointer(Attrib_vertex_gradient, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO_quad_color);
+    glVertexAttribPointer(Attrib_color_gradient, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    glDrawArrays(GL_TRIANGLES, 0, QUAD_VERTEX_COUNT);
+
+    glBindBuffer(GL_ARRAY_BUFFER, VBO_fan);
+    glVertexAttribPointer(Attrib_vertex_gradient, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO_fan_color);
+    glVertexAttribPointer(Attrib_color_gradient, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, FAN_VERTEX_COUNT);
+
+    glBindBuffer(GL_ARRAY_BUFFER, VBO_pentagon);
+    glVertexAttribPointer(Attrib_vertex_gradient, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO_pentagon_color);
+    glVertexAttribPointer(Attrib_color_gradient, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, PENTAGON_VERTEX_COUNT);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    glDisableVertexAttribArray(Attrib_vertex_gradient);
+    glDisableVertexAttribArray(Attrib_color_gradient);
+    glUseProgram(0);
+
+    checkOpenGLerror();
+}
+
 void Release() {
     ReleaseShader();
     ReleaseVBO();
@@ -294,6 +429,10 @@ void ReleaseShader() {
     if (ProgramUniform != 0) {
         glDeleteProgram(ProgramUniform);
         ProgramUniform = 0;
+    }
+    if (ProgramGradient != 0) {
+        glDeleteProgram(ProgramGradient);
+        ProgramGradient = 0;
     }
 }
 
@@ -310,6 +449,18 @@ void ReleaseVBO() {
     if (VBO_pentagon != 0) {
         glDeleteBuffers(1, &VBO_pentagon);
         VBO_pentagon = 0;
+    }
+    if (VBO_quad_color != 0) {
+        glDeleteBuffers(1, &VBO_quad_color);
+        VBO_quad_color = 0;
+    }
+    if (VBO_fan_color != 0) {
+        glDeleteBuffers(1, &VBO_fan_color);
+        VBO_fan_color = 0;
+    }
+    if (VBO_pentagon_color != 0) {
+        glDeleteBuffers(1, &VBO_pentagon_color);
+        VBO_pentagon_color = 0;
     }
 }
 
