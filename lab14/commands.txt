@@ -1,4 +1,3 @@
 cd /mnt/c/Users/Пользователь/source/repos/Comp_Graphic/lab14
-g++ main.cpp -o lab14 -lsfml-window -lsfml-system -lGLEW -lGL
-
 g++ fixed_scene.cpp -o lab14 -lsfml-window -lsfml-system -lGLEW -lGL
+
